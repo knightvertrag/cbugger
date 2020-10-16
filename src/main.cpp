@@ -1,6 +1,6 @@
 #include <iostream>
 #include <unistd.h>
-#include "debugger.h"
+#include "debugger.hpp"
 #include <sys/wait.h>
 
 void debugger::run()

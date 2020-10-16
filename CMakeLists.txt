@@ -9,7 +9,7 @@ add_executable(debugger src/main.cpp dependencies/linenoise/linenoise.c)
 
 add_custom_target(
    libelfin
-   COMMAND make
+   COMMAND ${MAKE}
    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/dependencies/libelfin
 )
 target_link_libraries(debugger

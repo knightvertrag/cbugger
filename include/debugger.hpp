@@ -1,6 +1,12 @@
-#ifndef debugger_H
-#define debugger_H
-#include <string>
+#ifndef DEBUGGER_HPP
+#define DEBUGGER_HPP
+#include <unordered_map>
+#include <cstdint>
+#include <signal.h>
+#include <fcntl.h>
+
+#include "dwarf/dwarf++.hh"
+#include "elf/elf++.hh"
 
 class debugger
 {

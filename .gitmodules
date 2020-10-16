@@ -1,6 +1,0 @@
-[submodule "dependecies/libelfin"]
-	path = dependecies/libelfin
-	url = https://github.com/aclements/libelfin.git
-[submodule "dependecies/linenoise"]
-	path = dependecies/linenoise
-	url = https://github.com/antirez/linenoise.git

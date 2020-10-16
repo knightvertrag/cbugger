@@ -1,6 +1,5 @@
 #include <iostream>
 #include <unistd.h>
-#include "include/linenoise.h"
 
 int main(int argc, char **argv)
 {

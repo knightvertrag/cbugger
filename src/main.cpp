@@ -1,7 +1,12 @@
+#include "debugger.hpp"
+
+#include "linenoise.h"
+
 #include <iostream>
 #include <unistd.h>
-#include "debugger.hpp"
 #include <sys/wait.h>
+
+using namespace venus;
 
 void debugger::run()
 {
@@ -10,6 +15,16 @@ void debugger::run()
     waitpid(m_pid, &wait_status, options);
 
     char *line = nullptr;
+    while ((line = linenoise("venus> ")) != nullptr)
+    {
+        handle_command(line);
+        linenoiseHistoryAdd(line);
+        linenoiseFree(line);
+    }
+}
+
+void debugger::handle_command(const std::string &line)
+{
 }
 
 int main(int argc, char **argv)

@@ -1,5 +1,5 @@
-#ifndef DEBUGGER_HPP
-#define DEBUGGER_HPP
+#pragma once
+
 #include <unordered_map>
 #include <cstdint>
 #include <signal.h>
@@ -8,7 +8,7 @@
 #include "dwarf/dwarf++.hh"
 #include "elf/elf++.hh"
 
-namespace venus
+namespace cbugger
 {
     class debugger
     {
@@ -16,11 +16,11 @@ namespace venus
         std::string m_program_name;
         pid_t m_pid;
         void handle_command(const std::string &line);
+        void continue_execution();
 
     public:
-        debugger(std::string prog_name, pid_t pid) : m_program_name{std::move(prog_name)}, m_pid{pid} {}
+        debugger(std::string prog_name, pid_t pid) : m_program_name(std::move(prog_name)), m_pid(pid) {}
 
         void run();
     };
-} // namespace venus
-#endif
+} // namespace cbugger

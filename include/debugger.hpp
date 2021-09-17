@@ -23,4 +23,6 @@ namespace cbugger
 
         void run();
     };
+
+    void execute_debugee(const std::string &prog_name);
 } // namespace cbugger

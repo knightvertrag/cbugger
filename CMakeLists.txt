@@ -5,7 +5,7 @@ include(CTest)
 enable_testing()
 
 include_directories(dependencies/libelfin dependencies/linenoise include)
-add_executable(cbugger src/main.cpp dependencies/linenoise/linenoise.c)
+add_executable(cbugger src/main.cpp src/debugger.cpp dependencies/linenoise/linenoise.c)
 
 add_custom_target(
    libelfin

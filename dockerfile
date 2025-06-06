@@ -5,8 +5,8 @@
 # See https://docs.docker.com/samples/library/gcc/ for more on how to use this image
 FROM gcc:latest
 
-RUN apt-get update && \
-    apt-get install -y cmake build-essential
+RUN apt update && \
+    apt install -y cmake build-essential
 
 
 # Install vcpkg, a C++ package manager
@@ -23,6 +23,6 @@ RUN mkdir build && cd build && \
     make
 
 # This command runs your application, comment out this line to compile only
-CMD ["./build/cbugger"]
+CMD ["./build/tools/cbg"]
 
 LABEL Name=cbugger Version=0.0.1

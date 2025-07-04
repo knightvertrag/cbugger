@@ -1,4 +1,4 @@
-add_library(libcbg STATIC libcbg.cpp)
+add_library(libcbg process.cpp)
 add_library(cbg::libcbg ALIAS libcbg)
 
 set_target_properties(
@@ -6,6 +6,9 @@ set_target_properties(
     PROPERTIES OUTPUT_NAME cbg
 )
 target_compile_features(libcbg PUBLIC cxx_std_17)
+
+find_package(spdlog CONFIG REQUIRED)
+target_link_libraries(libcbg PRIVATE spdlog::spdlog)
 
 target_include_directories(libcbg
     PUBLIC

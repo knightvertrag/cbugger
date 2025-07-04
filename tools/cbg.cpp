@@ -1,4 +1,3 @@
-#include <libcbg/libcbg.hpp>
 #include <unistd.h>
 #include <iostream>
 #include <sstream>
@@ -6,13 +5,18 @@
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <editline/readline.h>
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/basic_file_sink.h>
+#include <string.h>
+#include <libcbg/process.hpp>
+#include <libcbg/error.hpp>
 
 namespace
 {
     std::vector<std::string> split(std::string_view str, char delimiter)
     {
         std::vector<std::string> res{};
-        std::stringstream ss {std::string(str)};
+        std::stringstream ss{std::string(str)};
         std::string item;
 
         while (std::getline(ss, item, delimiter))
@@ -29,77 +33,31 @@ namespace
         return std::equal(str.begin(), str.end(), of.begin());
     }
 
-    void resume(pid_t pid) 
-    {
-        if (ptrace(PTRACE_CONT, pid, nullptr, nullptr) < 0)
-        {   
-            std::perror("Failed to continue process");
-            std::exit(-1);
-        }
-
-    }
-    void wait_on_signal(pid_t pid)
-    {
-        int wait_status;
-        int options = 0;
-        if (waitpid(pid, &wait_status, options) < 0)
-        {
-            std::perror("Failed to wait for process");
-            std::exit(-1);
-        }
-    }
-    pid_t attach(int argc, const char **argv)
+    std::unique_ptr<cbg::Process> attach(int argc, const char **argv)
     {
         pid_t pid = 0;
         if (argc == 3 and argv[1] == std::string_view("-p"))
         {
             pid = std::atoi(argv[2]);
-            if (pid <= 0)
-            {
-                std::cerr << "Invalid PID: \n";
-                return -1;
-            }
-            if (ptrace(PTRACE_ATTACH, pid, nullptr, nullptr) < 0)
-            {
-                std::perror("Failed to attach to process");
-                return -1;
-            }
+            return cbg::Process::attach(pid);
         }
         else
         {
             const char *program_path = argv[1];
-            if ((pid = fork()) < 0)
-            {
-                std::perror("Failed to fork");
-                return -1;
-            }
-            if (pid == 0)
-            {
-                if (ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) < 0)
-                {
-                    std::perror("Failed to trace process");
-                    return -1;
-                }
-                if (execlp(program_path, program_path, nullptr) < 0)
-                {
-                    std::perror("Failed to execute program");
-                    return -1;
-                }
-            }
+            return cbg::Process::launch(program_path);
         }
-
-        return pid;
     }
-    void handle_command(pid_t pid, std::string_view line)
+    void handle_command(std::unique_ptr<cbg::Process> &process, std::string_view line)
     {
         auto args = split(line, ' ');
         auto command = args[0];
         if (is_prefix(command, "continue"))
         {
-            resume(pid);
-            wait_on_signal(pid);
+            process->resume();
+            auto reason = process->wait_on_signal();
+            // print_stop_reason(*process, reason);
         }
-        else 
+        else
         {
             std::cerr << "Unknow command\n";
         }
@@ -107,23 +65,8 @@ namespace
 
 }
 
-int main(int argc, const char **argv)
+void main_loop(std::unique_ptr<cbg::Process> &process)
 {
-    if (argc == 1)
-    {
-        std::cerr << "Usage: " << argv[0] << " -p <pid> | --self\n";
-        return -1;
-    }
-
-    pid_t pid = attach(argc, argv);
-
-    int wait_status;
-    int options = 0;
-    if (waitpid(pid, &wait_status, options) < 0)
-    {
-        std::perror("Failed to wait for process");
-    }
-
     char *line = nullptr;
     while ((line = readline("sdb> ")) != nullptr)
     {
@@ -142,7 +85,37 @@ int main(int argc, const char **argv)
         }
         if (!line_str.empty())
         {
-            handle_command(pid, line_str);
+            try
+            {
+                handle_command(process, line_str);
+            }
+            catch (const cbg::Error &e)
+            {
+                std::cerr << e.what() << '\n';
+            }
         }
+    }
+}
+
+int main(int argc, const char **argv)
+{
+    // auto file_logger = spdlog::basic_logger_mt("file_logger", "logs/output.log");
+    // spdlog::set_default_logger(file_logger);
+    spdlog::set_level(spdlog::level::debug);
+    // spdlog::set_pattern("[%H:%M:%S %z] [%n] [%^---%L---%$] [thread %t] %v");
+    if (argc == 1)
+    {
+        std::cerr << "Usage: " << argv[0] << " -p <pid> | --self\n";
+        return -1;
+    }
+
+    try
+    {
+        auto process = attach(argc, argv);
+        main_loop(process);
+    }
+    catch (const cbg::Error &e)
+    {
+        std::cout << e.what() << "\n";
     }
 }

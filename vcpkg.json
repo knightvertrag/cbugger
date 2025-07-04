@@ -1,6 +1,7 @@
 {
     "dependencies": [
         "libedit",
-        "catch2"
+        "catch2",
+        "spdlog"
     ]
 }

@@ -6,7 +6,7 @@
 FROM gcc:latest
 
 RUN apt update && \
-    apt install -y cmake build-essential
+    apt install -y zip cmake build-essential
 
 
 # Install vcpkg, a C++ package manager

@@ -97,12 +97,27 @@ void main_loop(std::unique_ptr<cbg::Process> &process)
     }
 }
 
+void log_setup()
+{
+    try
+    {
+        auto file_logger = spdlog::basic_logger_mt("file_logger", "logs/debug_logs.log", true);
+        spdlog::set_default_logger(std::move(file_logger));
+        spdlog::set_level(spdlog::level::debug);
+        spdlog::set_pattern("[%H:%M:%S %z] [%n] [%^---%L---%$] [thread %t] %v");
+        spdlog::flush_on(spdlog::level::debug);
+        // spdlog::flush_every(std::chrono::seconds(5));
+        spdlog::debug("Begin logging");
+    }
+    catch (const spdlog::spdlog_ex &e)
+    {
+        std::cerr << "Log init failed because: " << e.what() << '\n';
+    }
+}
+
 int main(int argc, const char **argv)
 {
-    // auto file_logger = spdlog::basic_logger_mt("file_logger", "logs/output.log");
-    // spdlog::set_default_logger(file_logger);
-    spdlog::set_level(spdlog::level::debug);
-    // spdlog::set_pattern("[%H:%M:%S %z] [%n] [%^---%L---%$] [thread %t] %v");
+    log_setup();
     if (argc == 1)
     {
         std::cerr << "Usage: " << argv[0] << " -p <pid> | --self\n";

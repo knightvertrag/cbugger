@@ -1,4 +1,4 @@
-add_library(libcbg process.cpp)
+add_library(libcbg process.cpp pipe.cpp)
 add_library(cbg::libcbg ALIAS libcbg)
 
 set_target_properties(

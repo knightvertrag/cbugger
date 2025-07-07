@@ -8,42 +8,65 @@
 #include <spdlog/spdlog.h>
 #include <spdlog/fmt/ostr.h>
 #include <fmt/format.h>
+#include <libcbg/pipe.hpp>
 
-std::string print_stop_reason(cbg::stop_reason reason)
+namespace
 {
-    std::stringstream ss;
-    switch (reason.reason)
+    void exit_with_perror(cbg::Pipe &channel, std::string const &prefix)
     {
-    case cbg::process_state::EXITED:
-        ss << "Exited with status " << static_cast<int>(reason.info);
-        break;
-    case cbg::process_state::TERMINATED:
-        ss << "Terminated with signal " << sigabbrev_np(reason.info);
-        break;
-    case cbg::process_state::STOPPED:
-        ss << "Stopped by signal " << sigabbrev_np(reason.info);
-        break;
+        auto message = prefix + ": " + std::strerror(errno);
+        channel.write(reinterpret_cast<std::byte *>(message.data()), message.size());
+        exit(-1);
     }
-    return ss.str();
+
+    std::string print_stop_reason(cbg::stop_reason reason)
+    {
+        std::stringstream ss;
+        switch (reason.reason)
+        {
+        case cbg::process_state::EXITED:
+            ss << "Exited with status " << static_cast<int>(reason.info);
+            break;
+        case cbg::process_state::TERMINATED:
+            ss << "Terminated with signal " << sigabbrev_np(reason.info);
+            break;
+        case cbg::process_state::STOPPED:
+            ss << "Stopped by signal " << sigabbrev_np(reason.info);
+            break;
+        }
+        return ss.str();
+    }
 }
 
 std::unique_ptr<cbg::Process> cbg::Process::launch(const std::filesystem::path &path)
 {
+    Pipe channel(true);
     pid_t pid = fork();
     if (pid < 0)
     {
         Error::send_errno("Failed to fork process");
     }
-    if (pid == 0)
+    if (pid == 0) // in child process
     {
+        channel.close_read();
         if (ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) < 0)
         {
-            Error::send_errno("Failed to trace process");
+            exit_with_perror(channel, "Failed to trace debugee process");
         }
         if (execlp(path.c_str(), path.c_str(), nullptr) < 0)
         {
-            Error::send_errno("Failed to execute program");
+            exit_with_perror(channel, "Failed to execute debugee program");
         }
+    }
+    channel.close_write();
+    auto data = channel.read();
+    channel.close_read();
+
+    if (data.size() > 0)
+    {
+        waitpid(pid, nullptr, 0);
+        auto chars = reinterpret_cast<char *>(data.data());
+        Error::send(std::string(chars, chars + data.size()));
     }
     auto proc = std::unique_ptr<Process>(new Process(pid, false));
     proc->wait_on_signal();
@@ -139,10 +162,13 @@ cbg::stop_reason cbg::Process::wait_on_signal()
 }
 
 // Formattable support for cbg::stop_reason with spdlog/fmt
-namespace fmt {
-    template<>
-    struct formatter<cbg::stop_reason> : fmt::formatter<std::string> {
-        auto format(cbg::stop_reason stop_reason, format_context &ctx) const -> decltype(ctx.out()) {
+namespace fmt
+{
+    template <>
+    struct formatter<cbg::stop_reason> : fmt::formatter<std::string>
+    {
+        auto format(cbg::stop_reason stop_reason, format_context &ctx) const -> decltype(ctx.out())
+        {
             return format_to(ctx.out(), "Reason: {}", print_stop_reason(stop_reason));
         }
     };

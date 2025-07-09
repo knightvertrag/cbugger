@@ -38,7 +38,7 @@ namespace
     }
 }
 
-std::unique_ptr<cbg::Process> cbg::Process::launch(const std::filesystem::path &path)
+std::unique_ptr<cbg::Process> cbg::Process::launch(const std::filesystem::path &path, bool debug)
 {
     Pipe channel(true);
     pid_t pid = fork();
@@ -49,7 +49,7 @@ std::unique_ptr<cbg::Process> cbg::Process::launch(const std::filesystem::path &
     if (pid == 0) // in child process
     {
         channel.close_read();
-        if (ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) < 0)
+        if (debug && ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) < 0)
         {
             exit_with_perror(channel, "Failed to trace debugee process");
         }
@@ -68,8 +68,11 @@ std::unique_ptr<cbg::Process> cbg::Process::launch(const std::filesystem::path &
         auto chars = reinterpret_cast<char *>(data.data());
         Error::send(std::string(chars, chars + data.size()));
     }
-    auto proc = std::unique_ptr<Process>(new Process(pid, false));
-    proc->wait_on_signal();
+    auto proc = std::unique_ptr<Process>(new Process(pid, true, debug));
+    if (debug)
+    {
+        proc->wait_on_signal();
+    }
     return proc;
 }
 
@@ -84,7 +87,7 @@ std::unique_ptr<cbg::Process> cbg::Process::attach(pid_t pid)
         Error::send_errno("Failed to attach to process");
     }
 
-    auto proc = std::unique_ptr<Process>(new Process(pid, false));
+    auto proc = std::unique_ptr<Process>(new Process(pid, false, true));
     proc->wait_on_signal();
     return proc;
 }
@@ -94,14 +97,18 @@ cbg::Process::~Process()
     if (pid_ != 0)
     {
         int status;
-        if (state_ == process_state::RUNNING)
+        if (is_attached)
         {
-            kill(pid_, SIGSTOP);
-            waitpid(pid_, &status, 0);
+            if (state_ == process_state::RUNNING)
+            {
+                kill(pid_, SIGSTOP);
+                waitpid(pid_, &status, 0);
+            }
+
+            ptrace(PTRACE_DETACH, pid_, nullptr, nullptr);
+            kill(pid_, SIGCONT);
         }
 
-        ptrace(PTRACE_DETACH, pid_, nullptr, nullptr);
-        kill(pid_, SIGKILL);
         if (terminate_on_end_)
         {
             kill(pid_, SIGKILL);

@@ -33,7 +33,7 @@ void cbg::Pipe::close_read()
     if (fds_[READ_FD] != -1)
     {
         close(fds_[READ_FD]);
-        fds_[READ_FD] != -1;
+        fds_[READ_FD] = -1;
     }
 }
 

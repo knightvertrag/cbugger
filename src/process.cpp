@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <iostream>
 #include <ostream>
+#include <optional>
 #include <spdlog/spdlog.h>
 #include <spdlog/fmt/ostr.h>
 #include <fmt/format.h>
@@ -38,7 +39,7 @@ namespace
     }
 }
 
-std::unique_ptr<cbg::Process> cbg::Process::launch(const std::filesystem::path &path, bool debug)
+std::unique_ptr<cbg::Process> cbg::Process::launch(const std::filesystem::path &path, bool debug, std::optional<int> stdout_replacement)
 {
     Pipe channel(true);
     pid_t pid = fork();
@@ -49,10 +50,19 @@ std::unique_ptr<cbg::Process> cbg::Process::launch(const std::filesystem::path &
     if (pid == 0) // in child process
     {
         channel.close_read();
+        if (stdout_replacement.has_value())
+        {
+            if (dup2(*stdout_replacement, STDOUT_FILENO) < 0)
+            {
+                exit_with_perror(channel, "Failed to redirect stdout");
+            }
+        }
+
         if (debug && ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) < 0)
         {
             exit_with_perror(channel, "Failed to trace debugee process");
         }
+        
         if (execlp(path.c_str(), path.c_str(), nullptr) < 0)
         {
             exit_with_perror(channel, "Failed to execute debugee program");
@@ -163,9 +173,17 @@ cbg::stop_reason cbg::Process::wait_on_signal()
     }
     stop_reason reason(wait_status);
     state_ = reason.reason;
-
     spdlog::debug("{}", reason);
+    if (is_attached && state_ == process_state::STOPPED)
+    {
+        read_all_registers();
+    }
     return reason;
+}
+
+void cbg::Process::read_all_registers() 
+{
+    get_registers().load();
 }
 
 // Formattable support for cbg::stop_reason with spdlog/fmt

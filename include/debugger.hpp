@@ -4,9 +4,7 @@
 #include <cstdint>
 #include <signal.h>
 #include <fcntl.h>
-
-#include "dwarf/dwarf++.hh"
-#include "elf/elf++.hh"
+#include <string>
 
 namespace cbugger
 {

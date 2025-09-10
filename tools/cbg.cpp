@@ -10,6 +10,7 @@
 #include <string.h>
 #include <libcbg/process.hpp>
 #include <libcbg/error.hpp>
+#include <sys/user.h>
 
 namespace
 {

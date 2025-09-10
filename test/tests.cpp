@@ -2,6 +2,8 @@
 #include <fstream>
 #include <libcbg/process.hpp>
 #include <libcbg/error.hpp>
+#include <libcbg/pipe.hpp>
+#include <libcbg/bit.hpp>
 #include <sys/types.h>
 #include <signal.h>
 
@@ -25,7 +27,7 @@ namespace
         return data[status_indicator_index];
     }
 }
-TEST_CASE("Process::launch sucess", "[process]")
+TEST_CASE("Process::launch success", "[process]")
 {
     auto proc = Process::launch("yes", false);
     REQUIRE(process_exists(proc->pid()));
@@ -75,4 +77,26 @@ TEST_CASE("Process::resume already terminated", "[process]")
     proc->wait_on_signal();
     REQUIRE_THROWS_AS(proc->resume(), Error);
 
+}
+
+TEST_CASE("Write register works", "[register]")
+{
+    bool close_on_exec = false;
+    cbg::Pipe channel(close_on_exec);
+
+    auto proc = Process::launch("targets/register_write", true, channel.get_write());
+    channel.close_write();
+
+    proc->resume();
+    proc->wait_on_signal();
+
+    auto &regs = proc->get_registers();
+    regs.set_register("x20", 0x12345678);
+    regs.save();
+    
+    proc->resume();
+    proc->wait_on_signal();
+
+    auto data = channel.read();
+    REQUIRE(to_string_view(data) == "0x12345678");
 }

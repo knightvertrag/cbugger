@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.19)
-project(cbugger VERSION 0.1.0 LANGUAGES CXX)
+project(cbugger VERSION 0.1.0 LANGUAGES CXX ASM)
 
 include(CTest)
 include_directories(${CMAKE_SOURCE_DIR}/include)

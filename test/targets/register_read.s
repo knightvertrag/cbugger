@@ -33,44 +33,17 @@ main:
 
 
 
-    trap
+    // trap
     /* build test value into x20 (64-bit) */
     // movz    x20, #0xBABE
     // movk    x20, #0xCAFE, lsl #16
     // movk    x20, #0xBEEF, lsl #32
-    // movk    x20, #0xDEAD, lsl #48
-
-    /* load address of fmt into x0 (using adrp/add for PIC correctness) */
-    // ldr    x0, =fmt
-    adrp    x0, :pg_hi21:fmt
-    add     x0, x0, :lo12:fmt
-    mov     x1, x20
-    bl      printf
-    mov     x0, xzr      // NULL
-    bl      fflush
-
-    trap
-
-    /* build test value into v20 (128-bit) */
-    // movz    x21, #0x1234
-    // movk    x21, #0x5678, lsl #16
-    // movk    x21, #0x9abc, lsl #32
-    // movk    x21, #0xdef0, lsl #48
-    // mov     v20.d[0], x21
-
-    // movz    x22, #0x1111
-    // movk    x22, #0x2222, lsl #16
-    // movk    x22, #0x3333, lsl #32
-    // movk    x22, #0x4444, lsl #48
-    // mov     v20.d[1], x22
-
-    adrp    x0, :pg_hi21:fmt_128
-    add     x0, x0, :lo12:fmt_128
-    mov     x1, v20.d[1]
-    mov     x2, v20.d[0]
-    bl      printf
-    mov     x0, xzr
-    bl      fflush
+    movz    x22, #0xBEEF
+    movk    x22, #0xDEAD, lsl #16
+    // movz    w22, #0xBEEF
+    // movk    w22, #0xDEAD, lsl #16
+    // mov     x0, xzr
+    // bl      fflush
 
     trap
 

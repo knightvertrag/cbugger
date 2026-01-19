@@ -1,4 +1,6 @@
 add_executable(run_endlessly run_endlessly.cpp)
 add_executable(end_immediately end_immediately.cpp)
 add_executable(register_write register_write.s)
+add_executable(register_read register_read.s)
 target_compile_options(register_write PRIVATE)
+target_compile_options(register_read PRIVATE)

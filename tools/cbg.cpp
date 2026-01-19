@@ -14,6 +14,35 @@
 
 namespace
 {
+    bool is_prefix(std::string_view str, std::string_view of)
+    {
+        if (str.size() > of.size())
+            return false;
+        return std::equal(str.begin(), str.end(), of.begin());
+    }
+    
+    void print_help(const std::vector<std::string> &args)
+    {
+        if (args.size() == 1)
+        {
+            std::cerr << R"(Available commands:
+            continue - Resume the process
+            register - Commands for operating on registers)";
+        }
+        else if (is_prefix(args[1], "register"))
+        {
+            std::cerr << R"(Available commands:
+            read
+            read <register>
+            read all
+            write <register> <value>
+            )";
+        }
+        else
+        {
+            std::cerr << "No help available for this command\n";
+        }
+    }
     std::vector<std::string> split(std::string_view str, char delimiter)
     {
         std::vector<std::string> res{};
@@ -25,13 +54,6 @@ namespace
             res.push_back(item);
         }
         return res;
-    }
-
-    bool is_prefix(std::string_view str, std::string_view of)
-    {
-        if (str.size() > of.size())
-            return false;
-        return std::equal(str.begin(), str.end(), of.begin());
     }
 
     std::unique_ptr<cbg::Process> attach(int argc, const char **argv)
@@ -57,6 +79,10 @@ namespace
             process->resume();
             auto reason = process->wait_on_signal();
             // print_stop_reason(*process, reason);
+        }
+        else if (is_prefix(command, "help"))
+        {
+            print_help(args);
         }
         else
         {

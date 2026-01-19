@@ -15,9 +15,13 @@ namespace cbg
 {
     enum class RegisterFormat
     {
-        UInt32,
-        UInt64,
-        UInt128
+        U8,
+        U16,
+        U32,
+        U64,
+        F32,
+        F64,
+        Vec128,
     };
 
     struct RegisterView
@@ -56,6 +60,8 @@ namespace cbg
         }
     };
 
+    
+
     class Registers
     {
     public:
@@ -68,6 +74,8 @@ namespace cbg
 
     private:
         pid_t pid;
+        size_t break_debug_size;
+        size_t watch_debug_size;
         struct user_pt_regs gpr{};
         struct user_fpsimd_state fpr{};
         struct user_hwdebug_state hw_break{};

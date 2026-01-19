@@ -93,10 +93,38 @@ TEST_CASE("Write register works", "[register]")
     auto &regs = proc->get_registers();
     regs.set_register("x20", 0x12345678);
     regs.save();
+    proc->resume();
+    proc->wait_on_signal();
+    // regs.load();
+    auto data = channel.read();
+    REQUIRE(to_string_view(data) == "0x12345678");
     
+    regs.set_register("v20", 0x1234567812345678);
+    regs.save();
+    proc->resume();
+    proc->wait_on_signal();
+    data = channel.read();
+    REQUIRE(to_string_view(data) == "0000000000000000 1234567812345678");
+
+}
+
+TEST_CASE("Read register works", "[register]")
+{
+    bool close_on_exec = false;
+    cbg::Pipe channel(close_on_exec);
+
+    auto proc = Process::launch("targets/register_read", true, channel.get_write());
+    channel.close_write();
+
     proc->resume();
     proc->wait_on_signal();
 
-    auto data = channel.read();
-    REQUIRE(to_string_view(data) == "0x12345678");
+    auto &regs = proc->get_registers();
+    regs.load();
+    auto x22 = regs.get_register("x22");
+    REQUIRE(x22.get<uint64_t>() == 0xDEADBEEF);
+
+    // auto v20 = regs.get_register("v20");
+    // REQUIRE(v20 == 0x8765432187654321);
+
 }

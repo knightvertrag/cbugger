@@ -2,9 +2,21 @@
 #include <libcbg/error.hpp>
 #include <spdlog/spdlog.h>
 #include <sys/ptrace.h>
+#include <asm/ptrace.h>
 #include <elf.h>
 
 using namespace cbg;
+
+namespace
+{
+    size_t calc_debug_size(size_t dbg_info)
+    {
+        unsigned num_slots = dbg_info & 0xff;
+        size_t header = offsetof(struct user_hwdebug_state, dbg_regs);
+        size_t entry = sizeof(user_hwdebug_state::dbg_regs[0]);
+        return header + num_slots * entry;
+    }
+}
 
 Registers::Registers(pid_t pid) : pid(pid)
 {
@@ -31,10 +43,14 @@ void Registers::load()
     if (ptrace(PTRACE_GETREGSET, pid, (void *)NT_ARM_HW_BREAK, &iov) == -1)
         Error::send_errno("Failed to get HW breakpoints");
 
+    break_debug_size = calc_debug_size(hw_break.dbg_info);
+
     iov.iov_base = &hw_watch;
     iov.iov_len = sizeof(hw_watch);
     if (ptrace(PTRACE_GETREGSET, pid, (void *)NT_ARM_HW_WATCH, &iov) == -1)
         Error::send_errno("Failed to get HW watchpoints");
+
+    watch_debug_size = calc_debug_size(hw_watch.dbg_info);
 }
 
 void Registers::save()
@@ -52,15 +68,15 @@ void Registers::save()
     if (ptrace(PTRACE_SETREGSET, pid, (void *)NT_FPREGSET, &iov) == -1)
         Error::send_errno("Failed to set FPRs");
 
-    // iov.iov_base = &hw_break;
-    // iov.iov_len = sizeof(hw_break);
-    // if (ptrace(PTRACE_SETREGSET, pid, (void *)NT_ARM_HW_BREAK, &iov) == -1)
-    //     Error::send_errno("Failed to set HW breakpoints");
+    iov.iov_base = &hw_break;
+    iov.iov_len = break_debug_size;
+    if (ptrace(PTRACE_SETREGSET, pid, (void *)NT_ARM_HW_BREAK, &iov) == -1)
+        Error::send_errno("Failed to set HW breakpoints");
 
-    // iov.iov_base = &hw_watch;
-    // iov.iov_len = sizeof(hw_watch);
-    // if (ptrace(PTRACE_SETREGSET, pid, (void *)NT_ARM_HW_WATCH, &iov) == -1)
-    //     Error::send_errno("Failed to set HW watchpoints");
+    iov.iov_base = &hw_watch;
+    iov.iov_len = watch_debug_size;
+    if (ptrace(PTRACE_SETREGSET, pid, (void *)NT_ARM_HW_WATCH, &iov) == -1)
+        Error::send_errno("Failed to set HW watchpoints");
 }
 
 void Registers::build_views()

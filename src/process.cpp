@@ -172,6 +172,12 @@ cbg::stop_reason cbg::Process::wait_on_signal()
         Error::send_errno("Failed to wait for process");
     }
     stop_reason reason(wait_status);
+    if (reason.reason == process_state::EXITED || reason.reason == process_state::TERMINATED)
+    {
+        pid_ = 0;
+        std::cout << "Process exited" << std::endl;
+        return reason;
+    }
     state_ = reason.reason;
     spdlog::debug("{}", reason);
     if (is_attached && state_ == process_state::STOPPED)
@@ -184,6 +190,12 @@ cbg::stop_reason cbg::Process::wait_on_signal()
 void cbg::Process::read_all_registers() 
 {
     get_registers().load();
+}
+
+void cbg::Process::write_back_registers()
+{
+    if (registers_)
+        registers_->save();
 }
 
 // Formattable support for cbg::stop_reason with spdlog/fmt

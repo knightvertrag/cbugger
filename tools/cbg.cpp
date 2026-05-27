@@ -89,7 +89,6 @@ namespace
             std::cerr << "Unknow command\n";
         }
     }
-
 }
 
 void main_loop(std::unique_ptr<cbg::Process> &process)

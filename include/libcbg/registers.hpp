@@ -9,21 +9,12 @@
 #include <cstring>
 #include <libcbg/detail/register.inc>
 #include <libcbg/error.hpp>
+#include <libcbg/subregister_view.hpp>
 #include <asm/ptrace.h>
+#include <optional>
 
 namespace cbg
 {
-    enum class RegisterFormat
-    {
-        U8,
-        U16,
-        U32,
-        U64,
-        F32,
-        F64,
-        Vec128,
-    };
-
     struct RegisterView
     {
         std::string name;
@@ -52,10 +43,11 @@ namespace cbg
             {
                 cbg::Error::send_errno("Register is read-only");
             }
-            if (sizeof(T) != size)
+            if (sizeof(T) > size)
             {
-                cbg::Error::send_errno("Register size mismatch");
+                cbg::Error::send_errno("Register size incompatible");
             }
+            std::memset(writable_data, 0, size);
             std::memcpy(writable_data, &value, size);
         }
     };
@@ -71,6 +63,10 @@ namespace cbg
         const RegisterView &get_register(const std::string &name) const;
         RegisterView &get_register(const std::string &name);
         void set_register(const std::string &name, uint64_t value);
+        std::optional<SubregisterView> make_subview_by_name(std::string_view name, bool zero_upper_fp = true);
+        std::optional<uint64_t> read_sub_64(std::string_view name);
+        bool write_sub_u32(std::string_view name, uint32_t value);
+        bool write_sub_u64(std::string_view name, uint64_t value);
 
     private:
         pid_t pid;

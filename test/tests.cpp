@@ -128,3 +128,79 @@ TEST_CASE("Read register works", "[register]")
     // REQUIRE(v20 == 0x8765432187654321);
 
 }
+
+TEST_CASE("Subregister views (wN/sN/dN + vN lanes) implement correct aliasing and write policies", "[subregister]")
+{
+    // Launch with tracing enabled (default). This gives us a stopped + ptraced process immediately.
+    // We do not need to resume the child at all — all subregister work happens in the debugger's
+    // local copies of the regsets (gpr/fpr). The child target is only there to give us a live pid.
+    auto proc = Process::launch("targets/run_endlessly");
+
+    auto &regs = proc->get_registers();
+    regs.load();
+
+    // --- wN: 32-bit write zero-extends in the parent xN; reads truncate ---
+    REQUIRE(regs.write_sub_u32("w19", 0xDEADBEEF));
+    uint64_t x19 = regs.get_register("x19").get<uint64_t>();
+    REQUIRE(x19 == 0x00000000DEADBEEF);
+
+    auto w19 = regs.read_sub_64("w19");
+    REQUIRE(w19.has_value());
+    REQUIRE(*w19 == 0xDEADBEEF);
+
+    regs.set_register("x8", 0x1122334455667788ULL);
+    auto w8 = regs.read_sub_64("w8");
+    REQUIRE(w8.has_value());
+    REQUIRE(*w8 == 0x55667788);
+
+    REQUIRE_FALSE(regs.make_subview_by_name("w31").has_value());   // no physical w31 in the regset
+    REQUIRE_FALSE(regs.read_sub_64("w99").has_value());
+
+    // --- sN / dN scalar writes zero the upper bits of the parent vN (ZeroUpperVector128) ---
+    auto s5 = regs.make_subview_by_name("s5");
+    REQUIRE(s5.has_value());
+    s5->write_f32(3.14159f);
+
+    // After s5 write, bits [127:32] of v5 are zeroed. Therefore d5 (low 64 bits) has bits [63:32] == 0.
+    uint64_t d5_after_s = regs.read_sub_64("d5").value();
+    REQUIRE((d5_after_s >> 32) == 0);
+
+    // Full dN write also zeros the upper 64 bits of the vN (bits 127:64).
+    auto d12 = regs.make_subview_by_name("d12");
+    REQUIRE(d12.has_value());
+    d12->write_f64(2.718281828);
+    uint64_t v12_upper_lane = regs.make_subview_by_name("v12.2d[1]")->read_u64();
+    REQUIRE(v12_upper_lane == 0);
+
+    REQUIRE(regs.write_sub_u64("d31", 0xCAFEBABECAFEBABEULL));
+    uint64_t v31_upper = regs.make_subview_by_name("v31.2d[1]")->read_u64();
+    REQUIRE(v31_upper == 0);
+
+    // --- vN lane writes (4s/2d) use PreserveParentBits (other lanes must be untouched) ---
+    // All of these should now preserve siblings because the name parser forces Preserve for lane syntax.
+    auto l0 = regs.make_subview_by_name("v20.4s[0]");
+    auto l2 = regs.make_subview_by_name("v20.4s[2]");
+    l0->write_u32(0x11111111);
+    l2->write_u32(0x22222222);
+    REQUIRE(regs.write_sub_u32("v20.4s[1]", 0x33333333));
+    REQUIRE(regs.write_sub_u32("v20.4s[3]", 0x44444444));
+
+    REQUIRE(regs.make_subview_by_name("v20.4s[0]")->read_u32() == 0x11111111);
+    REQUIRE(regs.make_subview_by_name("v20.4s[1]")->read_u32() == 0x33333333);
+    REQUIRE(regs.make_subview_by_name("v20.4s[2]")->read_u32() == 0x22222222);
+    REQUIRE(regs.make_subview_by_name("v20.4s[3]")->read_u32() == 0x44444444);
+
+    // Out-of-range lanes and unknown arrangements return empty optional
+    REQUIRE_FALSE(regs.make_subview_by_name("v5.4s[4]").has_value());
+    REQUIRE_FALSE(regs.make_subview_by_name("v5.2d[2]").has_value());
+    REQUIRE_FALSE(regs.make_subview_by_name("v0.8h[0]").has_value()); // unsupported syntax
+
+    // Exercise the zero_upper_fp parameter path (false → PreserveParentBits for the lane)
+    auto lane_preserve = regs.make_subview_by_name("v7.4s[1]", /*zero_upper_fp=*/false);
+    REQUIRE(lane_preserve.has_value());
+    lane_preserve->write_u32(0xABCDABCD);
+    // (We don't assert sibling state here because we didn't initialize the other lanes in this scope,
+    // but the call exercises the Preserve code path and the factory.)
+
+    // No resume needed. The Process dtor will clean up the traced child.
+}

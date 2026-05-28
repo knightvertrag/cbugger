@@ -1,5 +1,6 @@
 #include <libcbg/registers.hpp>
 #include <libcbg/error.hpp>
+#include <libcbg/detail/register_name.hpp>
 #include <spdlog/spdlog.h>
 #include <sys/ptrace.h>
 #include <asm/ptrace.h>
@@ -15,25 +16,6 @@ namespace
         size_t header = offsetof(struct user_hwdebug_state, dbg_regs);
         size_t entry = sizeof(user_hwdebug_state::dbg_regs[0]);
         return header + num_slots * entry;
-    }
-    
-    int is_digit(char c)
-    {
-        return c >= '0' && c <= '9';
-    }
-
-    int parse_index(std::string_view sv)
-    {
-        if (sv.empty())
-            return -1;
-        int v = 0;
-        for (char c : sv)
-        {
-            if (!is_digit(c))
-                return -1;
-            v = v * 10 + (c - '0');
-        }
-        return v;
     }
 }
 
@@ -145,6 +127,15 @@ RegisterView &Registers::get_register(const std::string &name)
 void Registers::set_register(const std::string &name, uint64_t value)
 {
     spdlog::debug("Setting register {} to value {:#x}", name, value);
+
+    // Subregister path (wN, sN, dN, vN.4s[k], vN.2d[k]) — unified entry point
+    if (auto sub = make_subview_by_name(name))
+    {
+        sub->write_u64(value);
+        return;
+    }
+
+    // Full register path (xN, vN, pc, fpsr, brk_*, watch_*, etc.)
     RegisterView &reg = get_register(name);
     switch (reg.size)
     {
@@ -172,97 +163,71 @@ void Registers::set_register(const std::string &name, uint64_t value)
     }
 }
 
+size_t Registers::find_index(std::string_view name) const
+{
+    for (size_t i = 0; i < views.size(); ++i)
+    {
+        if (views[i].name == name)
+            return i;
+    }
+    Error::send_errno("Register not found: " + std::string(name));
+}
+
+RegisterDescriptor Registers::lookup(std::string_view name) const
+{
+    return { find_index(name) };
+}
+
+const RegisterView &Registers::get_register(RegisterDescriptor d) const
+{
+    return views[d.index];
+}
+
+RegisterView &Registers::get_register(RegisterDescriptor d)
+{
+    return views[d.index];
+}
+
+void Registers::set_register(RegisterDescriptor d, uint64_t value)
+{
+    // Reuse the existing size-dispatch logic by temporarily getting a reference
+    RegisterView &reg = views[d.index];
+    switch (reg.size)
+    {
+    case 1:  reg.set<uint8_t>(static_cast<uint8_t>(value)); break;
+    case 2:  reg.set<uint16_t>(static_cast<uint16_t>(value)); break;
+    case 4:  reg.set<uint32_t>(static_cast<uint32_t>(value)); break;
+    case 8:  reg.set<uint64_t>(value); break;
+    case 16: reg.set<__uint128_t>(static_cast<__uint128_t>(value)); break;
+    default: Error::send("Unsupported register size for descriptor");
+    }
+}
+
 std::optional<SubregisterView> Registers::make_subview_by_name(std::string_view name, bool zero_upper_fp)
 {
-    if (name.empty())
-        return std::nullopt;
-
-    // wN => lower 32 bits of xN (N=0..30). Always uses ZeroExtend32To64.
-    if (name.size() >= 2 && name[0] == 'w' && is_digit(name[1]))
+    auto spec = detail::parse_subregister_name(name);
+    switch (spec.kind)
     {
-        int n = parse_index(name.substr(1));
-        if (n >= 0 && n <= 30)
-            return make_wn(static_cast<uint8_t>(n), gpr);
-        return std::nullopt;
-    }
+    case detail::SubregisterSpec::Kind::Wn:
+        return make_wn(spec.n, gpr);
 
-    // sN/dN => scalar FP views of vN. Use zero_upper_fp (default true) for correct scalar write semantics.
-    if (name.size() >= 2 && (name[0] == 's' || name[0] == 'd') && is_digit(name[1]))
-    {
-        int n = parse_index(name.substr(1));
-        if (n >= 0 && n <= 31)
-        {
-            if (name[0] == 's')
-                return make_sn(static_cast<uint8_t>(n), fpr, zero_upper_fp);
-            else
-                return make_dn(static_cast<uint8_t>(n), fpr, zero_upper_fp);
-        }
+    case detail::SubregisterSpec::Kind::Sn:
+        return make_sn(spec.n, fpr, zero_upper_fp);
+
+    case detail::SubregisterSpec::Kind::Dn:
+        return make_dn(spec.n, fpr, zero_upper_fp);
+
+    case detail::SubregisterSpec::Kind::V4sLane:
+        // Lane writes intentionally ignore zero_upper_fp (they use PreserveParentBits).
+        return make_vn_lane_s(spec.n, spec.lane, fpr, /*zero_upper*/ false);
+
+    case detail::SubregisterSpec::Kind::V2dLane:
+        return make_vn_lane_d(spec.n, spec.lane, fpr, /*zero_upper*/ false);
+
+    case detail::SubregisterSpec::Kind::None:
+    default:
         return std::nullopt;
     }
-
-    // vN.4s[lane] or vN.2d[lane]  (lanes 0-based, bounds checked in factories)
-    if (name.size() >= 2 && name[0] == 'v' && is_digit(name[1]))
-    {
-        size_t p = 1;
-        while (p < name.size() && is_digit(name[p]))
-            ++p;
-
-        int n = parse_index(name.substr(1, p - 1));
-        if (n < 0 || n > 31)
-            return std::nullopt;
-
-        if (p >= name.size() || name[p] != '.')
-            return std::nullopt;
-        ++p;
-
-        bool is_4s = false;
-        if (p + 1 < name.size() && name[p] == '4' && name[p + 1] == 's')
-        {
-            is_4s = true;
-            p += 2;
-        }
-        else if (p + 1 < name.size() && name[p] == '2' && name[p + 1] == 'd')
-        {
-            is_4s = false;
-            p += 2;
-        }
-        else
-        {
-            return std::nullopt;
-        }
-
-        if (p >= name.size() || name[p] != '[')
-            return std::nullopt;
-        ++p;
-
-        size_t lane_start = p;
-        while (p < name.size() && is_digit(name[p]))
-            ++p;
-
-        int lane = parse_index(name.substr(lane_start, p - lane_start));
-        if (lane < 0)
-            return std::nullopt;
-
-        if (p >= name.size() || name[p] != ']')
-            return std::nullopt;
-
-        if (is_4s)
-        {
-            if (lane > 3)
-                return std::nullopt;
-            // Lane writes should preserve the rest of the vector (other lanes + upper bits).
-            // The zero_upper_fp flag is intended for scalar sN/dN names.
-            return make_vn_lane_s(static_cast<uint8_t>(n), static_cast<uint8_t>(lane), fpr, /*zero_upper*/ false);
-        }
-        else
-        {
-            if (lane > 1)
-                return std::nullopt;
-            return make_vn_lane_d(static_cast<uint8_t>(n), static_cast<uint8_t>(lane), fpr, /*zero_upper*/ false);
-        }
-    }
-
-    return std::nullopt;
 }
 
 std::optional<uint64_t> Registers::read_sub_64(std::string_view name)

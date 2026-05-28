@@ -52,6 +52,13 @@ namespace cbg
         }
     };
 
+    // Lightweight cached handle for fast O(1) register access after one-time name resolution.
+    // Obtained via Registers::lookup(). Indices are stable for the lifetime of the Registers object.
+    struct RegisterDescriptor
+    {
+        size_t index;
+    };
+
     
 
     class Registers
@@ -63,6 +70,13 @@ namespace cbg
         const RegisterView &get_register(const std::string &name) const;
         RegisterView &get_register(const std::string &name);
         void set_register(const std::string &name, uint64_t value);
+
+        // === Minimal fast-path descriptor API (additive, string API unchanged) ===
+        RegisterDescriptor lookup(std::string_view name) const;
+        const RegisterView &get_register(RegisterDescriptor d) const;
+        RegisterView &get_register(RegisterDescriptor d);
+        void set_register(RegisterDescriptor d, uint64_t value);
+
         std::optional<SubregisterView> make_subview_by_name(std::string_view name, bool zero_upper_fp = true);
         std::optional<uint64_t> read_sub_64(std::string_view name);
         bool write_sub_u32(std::string_view name, uint32_t value);
@@ -79,6 +93,9 @@ namespace cbg
         std::vector<RegisterView> views;
 
         void build_views();
+
+        // Internal helper shared by string lookup and new descriptor lookup.
+        size_t find_index(std::string_view name) const;
     };
 
 }

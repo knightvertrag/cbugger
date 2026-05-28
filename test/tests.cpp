@@ -156,6 +156,20 @@ TEST_CASE("Subregister views (wN/sN/dN + vN lanes) implement correct aliasing an
     REQUIRE_FALSE(regs.make_subview_by_name("w31").has_value());   // no physical w31 in the regset
     REQUIRE_FALSE(regs.read_sub_64("w99").has_value());
 
+    // --- set_register now also accepts subregister names (unified write path) ---
+    regs.set_register("w20", 0xCAFEBABE);
+    uint64_t x20 = regs.get_register("x20").get<uint64_t>();
+    REQUIRE(x20 == 0x00000000CAFEBABE);  // zero-extend policy still applied
+
+    auto w20_via_sub = regs.read_sub_64("w20");
+    REQUIRE(w20_via_sub.has_value());
+    REQUIRE(*w20_via_sub == 0xCAFEBABE);
+
+    // FP sub via set_register (raw bit pattern) — s5 write using integer bits
+    regs.set_register("s7", 0x40490FDBu);  // bits for 3.1415927f approx
+    uint64_t d7_after_s_via_set = regs.read_sub_64("d7").value();
+    REQUIRE((d7_after_s_via_set >> 32) == 0);  // ZeroUpperVector128 still honored
+
     // --- sN / dN scalar writes zero the upper bits of the parent vN (ZeroUpperVector128) ---
     auto s5 = regs.make_subview_by_name("s5");
     REQUIRE(s5.has_value());

@@ -1,4 +1,4 @@
-add_library(libcbg process.cpp pipe.cpp registers.cpp subregister_view.cpp)
+add_library(libcbg process.cpp pipe.cpp registers.cpp register_name.cpp subregister_view.cpp)
 add_library(cbg::libcbg ALIAS libcbg)
 
 set_target_properties(

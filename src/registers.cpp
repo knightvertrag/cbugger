@@ -16,7 +16,7 @@ namespace
         size_t entry = sizeof(user_hwdebug_state::dbg_regs[0]);
         return header + num_slots * entry;
     }
-    
+
     int is_digit(char c)
     {
         return c >= '0' && c <= '9';

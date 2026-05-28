@@ -204,3 +204,45 @@ TEST_CASE("Subregister views (wN/sN/dN + vN lanes) implement correct aliasing an
 
     // No resume needed. The Process dtor will clean up the traced child.
 }
+
+TEST_CASE("RegisterDescriptor provides fast O(1) access equivalent to string lookup", "[register][descriptor]")
+{
+    auto proc = Process::launch("targets/run_endlessly");
+    auto &regs = proc->get_registers();
+    regs.load();
+
+    // Basic equivalence for a few representative registers
+    auto d_x19 = regs.lookup("x19");
+    auto d_v5  = regs.lookup("v5");
+    auto d_fpsr = regs.lookup("fpsr");
+
+    REQUIRE(&regs.get_register("x19") == &regs.get_register(d_x19));
+    REQUIRE(&regs.get_register("v5")  == &regs.get_register(d_v5));
+    REQUIRE(&regs.get_register("fpsr") == &regs.get_register(d_fpsr));
+
+    // Writes via descriptor are visible via string path (and vice versa)
+    regs.set_register(d_x19, 0xDEADBEEFCAFEBABEULL);
+    REQUIRE(regs.get_register("x19").get<uint64_t>() == 0xDEADBEEFCAFEBABEULL);
+
+    regs.get_register("v5").set<__uint128_t>(__uint128_t(0x1122334455667788ULL) << 64 | 0x99AABBCCDDEEFF00ULL);
+    auto v5_via_desc = regs.get_register(d_v5).get<__uint128_t>();
+    REQUIRE(v5_via_desc == (__uint128_t(0x1122334455667788ULL) << 64 | 0x99AABBCCDDEEFF00ULL));
+
+    // "Resolve once, use many times" pattern works cleanly
+    std::vector<cbg::RegisterDescriptor> gpr_descs;
+    const char *some_gprs[] = {"x0", "x8", "sp", "pc"};
+    for (const char *n : some_gprs)
+        gpr_descs.push_back(regs.lookup(n));
+
+    for (size_t i = 0; i < gpr_descs.size(); ++i)
+    {
+        uint64_t val = 0x1000 + i;
+        regs.set_register(gpr_descs[i], val);
+        REQUIRE(regs.get_register(some_gprs[i]).get<uint64_t>() == val);
+    }
+
+    // HW debug registers also work
+    auto d_brk = regs.lookup("brk_addr3");
+    regs.set_register(d_brk, 0x0000AAAA00001234ULL);
+    REQUIRE(regs.get_register("brk_addr3").get<uint64_t>() == 0x0000AAAA00001234ULL);
+}

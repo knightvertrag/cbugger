@@ -172,6 +172,46 @@ void Registers::set_register(const std::string &name, uint64_t value)
     }
 }
 
+size_t Registers::find_index(std::string_view name) const
+{
+    for (size_t i = 0; i < views.size(); ++i)
+    {
+        if (views[i].name == name)
+            return i;
+    }
+    Error::send_errno("Register not found: " + std::string(name));
+}
+
+RegisterDescriptor Registers::lookup(std::string_view name) const
+{
+    return { find_index(name) };
+}
+
+const RegisterView &Registers::get_register(RegisterDescriptor d) const
+{
+    return views[d.index];
+}
+
+RegisterView &Registers::get_register(RegisterDescriptor d)
+{
+    return views[d.index];
+}
+
+void Registers::set_register(RegisterDescriptor d, uint64_t value)
+{
+    // Reuse the existing size-dispatch logic by temporarily getting a reference
+    RegisterView &reg = views[d.index];
+    switch (reg.size)
+    {
+    case 1:  reg.set<uint8_t>(static_cast<uint8_t>(value)); break;
+    case 2:  reg.set<uint16_t>(static_cast<uint16_t>(value)); break;
+    case 4:  reg.set<uint32_t>(static_cast<uint32_t>(value)); break;
+    case 8:  reg.set<uint64_t>(value); break;
+    case 16: reg.set<__uint128_t>(static_cast<__uint128_t>(value)); break;
+    default: Error::send("Unsupported register size for descriptor");
+    }
+}
+
 std::optional<SubregisterView> Registers::make_subview_by_name(std::string_view name, bool zero_upper_fp)
 {
     if (name.empty())

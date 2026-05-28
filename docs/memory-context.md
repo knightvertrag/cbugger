@@ -108,9 +108,12 @@ This is the most sophisticated part of the current codebase (heavy focus of comm
 - Subregister views solve the common debugger problem of "when user says `w20` or `s5`, what bits actually move and what gets zeroed in the parent register?"
 - Write policies (`ZeroExtend32To64`, `ZeroUpperVector128`, `PreserveParentBits`) encode ARM architectural rules cleanly.
 
+A lightweight `RegisterDescriptor` (obtained once via `Registers::lookup(name)`) now provides true O(1) access to full registers for hot paths, while the original string-based API remains the primary surface for the CLI and subregisters (following the same "string + cached handle" pattern used by GDB).
+
 ### Current gaps in the register layer (precise locations)
 - Minor: `set_register` for 16-byte registers [src/registers.cpp:162](src/registers.cpp) takes a `uint64_t value` and casts it — loses the upper bits the caller probably wanted (unchanged from prior state).
 - No higher-level helpers yet for convenient subregister access from the CLI or for SVE/SME registers (future work).
+- The fast `RegisterDescriptor` path is currently only for full registers; subregisters remain string-only (by design).
 
 ---
 

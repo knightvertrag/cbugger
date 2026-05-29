@@ -313,19 +313,31 @@ c / continue                 resume + show stop reason)";
         }
         std::string name = args[2];
 
-        // Prefer subregister view first (wN, sN, dN, vN.4s[k], vN.2d[k]) — these need SubregisterView for typed printing
-        if (auto sub = regs.make_subview_by_name(name))
-        {
-            print_subregister_value(name, *sub);
-            return;
-        }
-
-        // Full register — use fast descriptor path
         try
         {
-            auto d = regs.lookup(name);
-            const auto &rv = regs.get_register(d);
-            print_register_value(name, rv);
+            auto h = regs.resolve(name);
+
+            if (auto val = regs.read(h))
+            {
+                // For nice display we still branch on whether it's a subregister
+                // (SubregisterView gives us the best float interpretation + policy view).
+                // This is the remaining necessary use of make_subview_by_name for presentation.
+                if (auto sub = regs.make_subview_by_name(name))
+                {
+                    print_subregister_value(name, *sub);
+                }
+                else
+                {
+                    // Full register path using the old descriptor for now
+                    auto d = regs.lookup(name);
+                    const auto &rv = regs.get_register(d);
+                    print_register_value(name, rv);
+                }
+            }
+            else
+            {
+                std::cerr << "Failed to read register '" << name << "'\n";
+            }
         }
         catch (const cbg::Error &e)
         {
@@ -344,40 +356,23 @@ c / continue                 resume + show stop reason)";
         std::string name = args[2];
         std::string valstr = args[3];
 
-        // Decide whether the target requires float syntax (only scalar FP subs currently)
-        bool use_float_syntax = false;
-        if (auto sub = regs.make_subview_by_name(name))
-        {
-            auto fmt = sub->format;
-            use_float_syntax = (fmt == cbg::RegisterFormat::F32 || fmt == cbg::RegisterFormat::F64);
-        }
+        // === New experimental unified path ===
+        auto h = regs.resolve(name);
+        auto fmt = regs.get_format(h);
+        auto bit_size = regs.get_bit_size(h);
 
-        uint64_t raw = 0;
-        if (use_float_syntax)
+        auto opt_raw = cbg::Registers::parse_register_value(valstr, fmt, bit_size);
+        if (!opt_raw)
         {
-            double d = parse_floating(valstr);
-            if (auto sub = regs.make_subview_by_name(name))
-            {
-                if (sub->format == cbg::RegisterFormat::F32)
-                {
-                    float f = static_cast<float>(d);
-                    std::memcpy(&raw, &f, sizeof(f));   // preserve exact bits
-                }
-                else
-                {
-                    std::memcpy(&raw, &d, sizeof(d));
-                }
-            }
+            std::cerr << "Invalid value '" << valstr << "' for register/subregister '" << name << "'\n";
+            return;
         }
-        else
-        {
-            raw = parse_integer(valstr);
-        }
+        uint64_t raw = *opt_raw;
 
         try
         {
-            // Unified call — now handles both full registers and all subregister forms (wN/sN/dN/v lanes)
-            regs.set_register(name, raw);
+            auto h = regs.resolve(name);
+            regs.write(h, raw);
             process->write_back_registers();
 
             std::cout << "Wrote " << name << " <- " << valstr << "\n";

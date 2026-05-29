@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fstream>
+#include <variant>
 #include <libcbg/process.hpp>
 #include <libcbg/error.hpp>
 #include <libcbg/pipe.hpp>
@@ -144,30 +145,30 @@ TEST_CASE("Subregister views (wN/sN/dN + vN lanes) implement correct aliasing an
     uint64_t x19 = regs.get_register("x19").get<uint64_t>();
     REQUIRE(x19 == 0x00000000DEADBEEF);
 
-    auto w19 = regs.read_sub_64("w19");
+    auto w19 = regs.read_sub_u64("w19");
     REQUIRE(w19.has_value());
     REQUIRE(*w19 == 0xDEADBEEF);
 
     regs.set_register("x8", 0x1122334455667788ULL);
-    auto w8 = regs.read_sub_64("w8");
+    auto w8 = regs.read_sub_u64("w8");
     REQUIRE(w8.has_value());
     REQUIRE(*w8 == 0x55667788);
 
     REQUIRE_FALSE(regs.make_subview_by_name("w31").has_value());   // no physical w31 in the regset
-    REQUIRE_FALSE(regs.read_sub_64("w99").has_value());
+    REQUIRE_FALSE(regs.read_sub_u64("w99").has_value());
 
     // --- set_register now also accepts subregister names (unified write path) ---
     regs.set_register("w20", 0xCAFEBABE);
     uint64_t x20 = regs.get_register("x20").get<uint64_t>();
     REQUIRE(x20 == 0x00000000CAFEBABE);  // zero-extend policy still applied
 
-    auto w20_via_sub = regs.read_sub_64("w20");
+    auto w20_via_sub = regs.read_sub_u64("w20");
     REQUIRE(w20_via_sub.has_value());
     REQUIRE(*w20_via_sub == 0xCAFEBABE);
 
     // FP sub via set_register (raw bit pattern) — s5 write using integer bits
     regs.set_register("s7", 0x40490FDBu);  // bits for 3.1415927f approx
-    uint64_t d7_after_s_via_set = regs.read_sub_64("d7").value();
+    uint64_t d7_after_s_via_set = regs.read_sub_u64("d7").value();
     REQUIRE((d7_after_s_via_set >> 32) == 0);  // ZeroUpperVector128 still honored
 
     // --- sN / dN scalar writes zero the upper bits of the parent vN (ZeroUpperVector128) ---
@@ -176,7 +177,7 @@ TEST_CASE("Subregister views (wN/sN/dN + vN lanes) implement correct aliasing an
     s5->write_f32(3.14159f);
 
     // After s5 write, bits [127:32] of v5 are zeroed. Therefore d5 (low 64 bits) has bits [63:32] == 0.
-    uint64_t d5_after_s = regs.read_sub_64("d5").value();
+    uint64_t d5_after_s = regs.read_sub_u64("d5").value();
     REQUIRE((d5_after_s >> 32) == 0);
 
     // Full dN write also zeros the upper 64 bits of the vN (bits 127:64).
@@ -259,4 +260,103 @@ TEST_CASE("RegisterDescriptor provides fast O(1) access equivalent to string loo
     auto d_brk = regs.lookup("brk_addr3");
     regs.set_register(d_brk, 0x0000AAAA00001234ULL);
     REQUIRE(regs.get_register("brk_addr3").get<uint64_t>() == 0x0000AAAA00001234ULL);
+}
+
+TEST_CASE("RegisterHandle provides unified resolve + read/write for full and sub registers", "[register][handle]")
+{
+    auto proc = Process::launch("targets/run_endlessly");
+    auto &regs = proc->get_registers();
+    regs.load();
+
+    // Full register handle
+    auto h_x19 = regs.resolve("x19");
+    REQUIRE(regs.get_format(h_x19) == RegisterFormat::U64);
+    REQUIRE(regs.get_bit_size(h_x19) == 64);
+
+    // Subregister handles of different kinds
+    auto h_w19   = regs.resolve("w19");
+    auto h_s5    = regs.resolve("s5");
+    auto h_d12   = regs.resolve("d12");
+    auto h_lane  = regs.resolve("v20.4s[2]");
+    auto h_lane2 = regs.resolve("v7.2d[1]");
+
+    REQUIRE(regs.get_format(h_w19) == RegisterFormat::U32);
+    REQUIRE(regs.get_bit_size(h_w19) == 32);
+
+    REQUIRE(regs.get_format(h_s5) == RegisterFormat::F32);
+    REQUIRE(regs.get_bit_size(h_s5) == 32);
+
+    REQUIRE(regs.get_format(h_d12) == RegisterFormat::F64);
+    REQUIRE(regs.get_bit_size(h_d12) == 64);
+
+    REQUIRE(regs.get_format(h_lane) == RegisterFormat::F32);
+    REQUIRE(regs.get_bit_size(h_lane) == 32);
+
+    // Read equivalence with old paths
+    auto via_handle = regs.read(h_x19);
+    auto via_classic = regs.get_register("x19").get<uint64_t>();
+    REQUIRE(via_handle.has_value());
+    REQUIRE(*via_handle == via_classic);
+
+    auto via_sub = regs.read(h_w19);
+    REQUIRE(via_sub.has_value());
+
+    // Write via handle + read back (full reg)
+    regs.write(h_x19, 0xDEADBEEFCAFEBABEULL);
+    REQUIRE(*regs.read(h_x19) == 0xDEADBEEFCAFEBABEULL);
+
+    // Write via handle + policy verification for wN (zero-extend)
+    regs.write(regs.resolve("x8"), 0xFFFFFFFFFFFFFFFFULL);
+    regs.write(regs.resolve("w8"), 0x12345678);
+    REQUIRE(regs.get_register("x8").get<uint64_t>() == 0x0000000012345678ULL);
+
+    // Write via handle for scalar float view (sN should zero upper bits of parent v reg)
+    regs.write(regs.resolve("v5"), 0xFFFFFFFFFFFFFFFFULL); // lower 64 bits of v5
+    regs.write(regs.resolve("s5"), 0x40490FDBu); // bits for ~3.14159f
+    auto d5_after = regs.read(regs.resolve("d5"));
+    REQUIRE(d5_after.has_value());
+    REQUIRE((*d5_after >> 32) == 0); // upper 32 bits of the low 64 should be zeroed
+
+    // Direct make_subview from descriptor
+    auto h_w10 = regs.resolve("w10");
+    auto sv_direct = regs.make_subview(std::get<SubregisterDescriptor>(h_w19));
+    REQUIRE(sv_direct.has_value());
+    // Write through the direct view should behave identically
+    sv_direct->write_u32(0xBEEFDEAD);
+    REQUIRE(*regs.read(h_w19) == 0xBEEFDEAD);
+
+    // parse_register_value round-trips
+    auto bits_int = Registers::parse_register_value("0x1234ABCD", RegisterFormat::U32, 32);
+    REQUIRE(bits_int.has_value());
+    REQUIRE(*bits_int == 0x1234ABCD);
+
+    auto bits_f32 = Registers::parse_register_value("3.14159", RegisterFormat::F32, 32);
+    REQUIRE(bits_f32.has_value());
+    // Reinterpret and check roughly
+    float f;
+    std::memcpy(&f, &*bits_f32, sizeof(f));
+    REQUIRE(std::abs(f - 3.14159f) < 0.0001f);
+}
+
+TEST_CASE("parse_register_value handles integer and floating-point inputs correctly", "[register][parse]")
+{
+    using cbg::RegisterFormat;
+
+    // Integer paths
+    REQUIRE(Registers::parse_register_value("123", RegisterFormat::U32, 32).value() == 123);
+    REQUIRE(Registers::parse_register_value("0xFF", RegisterFormat::U8, 8).value() == 0xFF);
+    REQUIRE(Registers::parse_register_value("-1", RegisterFormat::U64, 64).value() == ~0ULL); // strtoull behavior
+
+    // Float paths with correct bit reinterpret
+    auto f32_bits = Registers::parse_register_value("1.5", RegisterFormat::F32, 32);
+    REQUIRE(f32_bits.has_value());
+    float f32;
+    std::memcpy(&f32, &*f32_bits, sizeof(f32));
+    REQUIRE(f32 == 1.5f);
+
+    auto f64_bits = Registers::parse_register_value("2.718281828", RegisterFormat::F64, 64);
+    REQUIRE(f64_bits.has_value());
+    double f64;
+    std::memcpy(&f64, &*f64_bits, sizeof(f64));
+    REQUIRE(std::abs(f64 - 2.718281828) < 1e-9);
 }

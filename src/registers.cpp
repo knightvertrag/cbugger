@@ -178,6 +178,181 @@ RegisterDescriptor Registers::lookup(std::string_view name) const
     return { find_index(name) };
 }
 
+RegisterHandle Registers::resolve(std::string_view name) const
+{
+    // Try full register first (fast path + stable index)
+    for (size_t i = 0; i < views.size(); ++i)
+    {
+        if (views[i].name == name)
+        {
+            return FullRegisterDescriptor{i};
+        }
+    }
+
+    // Subregister
+    auto spec = detail::parse_subregister_name(name);
+    if (spec.kind != detail::SubregisterSpec::Kind::None)
+    {
+        SubregisterDescriptor sd;
+        using K = SubregisterDescriptor::Kind;
+
+        switch (spec.kind)
+        {
+        case detail::SubregisterSpec::Kind::Wn:      sd.kind = K::Wn;      break;
+        case detail::SubregisterSpec::Kind::Sn:      sd.kind = K::Sn;      break;
+        case detail::SubregisterSpec::Kind::Dn:      sd.kind = K::Dn;      break;
+        case detail::SubregisterSpec::Kind::V4sLane: sd.kind = K::V4sLane; break;
+        case detail::SubregisterSpec::Kind::V2dLane: sd.kind = K::V2dLane; break;
+        default:                                     sd.kind = K::None;    break;
+        }
+        sd.n    = spec.n;
+        sd.lane = spec.lane;
+
+        // Populate cached format + bit_size using the descriptor directly
+        // (no string reconstruction / round-trip through make_subview_by_name).
+        if (auto sv = make_subview(sd))
+        {
+            sd.format   = sv->format;
+            sd.bit_size = sv->bit_size;
+        }
+
+        return sd;
+    }
+
+    Error::send_errno("Register or subregister not found: " + std::string(name));
+}
+
+RegisterFormat Registers::get_format(const RegisterHandle& h) const
+{
+    return std::visit([this](auto&& desc) -> RegisterFormat {
+        using T = std::decay_t<decltype(desc)>;
+        if constexpr (std::is_same_v<T, FullRegisterDescriptor>)
+        {
+            return views[desc.index].format;
+        }
+        else if constexpr (std::is_same_v<T, SubregisterDescriptor>)
+        {
+            return desc.format;   // cached at resolve time
+        }
+        return RegisterFormat::U64;
+    }, h);
+}
+
+size_t Registers::get_bit_size(const RegisterHandle& h) const
+{
+    return std::visit([this](auto&& desc) -> size_t {
+        using T = std::decay_t<decltype(desc)>;
+        if constexpr (std::is_same_v<T, FullRegisterDescriptor>)
+        {
+            return views[desc.index].size * 8;
+        }
+        else if constexpr (std::is_same_v<T, SubregisterDescriptor>)
+        {
+            return desc.bit_size;   // cached at resolve time
+        }
+        return 64;
+    }, h);
+}
+
+std::optional<uint64_t> Registers::read(const RegisterHandle& h) const
+{
+    return std::visit([this](auto&& desc) -> std::optional<uint64_t> {
+        using T = std::decay_t<decltype(desc)>;
+        if constexpr (std::is_same_v<T, FullRegisterDescriptor>)
+        {
+            const auto& rv = views[desc.index];
+            switch (rv.size)
+            {
+            case 1:  return rv.template get<uint8_t>();
+            case 2:  return rv.template get<uint16_t>();
+            case 4:  return rv.template get<uint32_t>();
+            case 8:  return rv.template get<uint64_t>();
+            case 16: {
+                __uint128_t v = rv.template get<__uint128_t>();
+                return static_cast<uint64_t>(v); // lower 64 bits for now
+            }
+            default: return std::nullopt;
+            }
+        }
+        else if constexpr (std::is_same_v<T, SubregisterDescriptor>)
+        {
+            // Use direct descriptor-based construction (no string allocation/parsing).
+            if (auto sv = make_subview(desc))
+            {
+                return sv->read_u64();
+            }
+            return std::nullopt;
+        }
+        return std::nullopt;
+    }, h);
+}
+
+void Registers::write(const RegisterHandle& h, uint64_t value)
+{
+    std::visit([this, value](auto&& desc) {
+        using T = std::decay_t<decltype(desc)>;
+        if constexpr (std::is_same_v<T, FullRegisterDescriptor>)
+        {
+            set_register(RegisterDescriptor{desc.index}, value);
+        }
+        else if constexpr (std::is_same_v<T, SubregisterDescriptor>)
+        {
+            // Use direct descriptor-based construction.
+            if (auto sv = make_subview(desc))
+            {
+                sv->write_u64(value);
+            }
+        }
+    }, h);
+}
+
+/* static */
+std::optional<uint64_t> Registers::parse_register_value(std::string_view text,
+                                                        RegisterFormat     fmt,
+                                                        size_t             bit_size)
+{
+    if (text.empty())
+        return std::nullopt;
+
+    if (fmt == RegisterFormat::F32 || fmt == RegisterFormat::F64)
+    {
+        char* end = nullptr;
+        double d = std::strtod(text.data(), &end);
+        if (end == text.data() || *end != '\0')
+            return std::nullopt;
+
+        if (fmt == RegisterFormat::F32)
+        {
+            float f = static_cast<float>(d);
+            uint32_t bits;
+            std::memcpy(&bits, &f, sizeof(bits));
+            return bits;
+        }
+        else
+        {
+            uint64_t bits;
+            std::memcpy(&bits, &d, sizeof(bits));
+            return bits;
+        }
+    }
+
+    // Integer / bit pattern path
+    char* end = nullptr;
+    uint64_t v = std::strtoull(text.data(), &end, 0);
+    if (end == text.data() || *end != '\0')
+        return std::nullopt;
+
+    // Mask to the target bit width for safety
+    if (bit_size > 0 && bit_size < 64)
+    {
+        uint64_t mask = (1ULL << bit_size) - 1;
+        v &= mask;
+    }
+    return v;
+}
+
+
+
 const RegisterView &Registers::get_register(RegisterDescriptor d) const
 {
     return views[d.index];
@@ -218,11 +393,10 @@ std::optional<SubregisterView> Registers::make_subview_by_name(std::string_view 
         return make_dn(spec.n, fpr, zero_upper_fp);
 
     case detail::SubregisterSpec::Kind::V4sLane:
-        // Lane writes intentionally ignore zero_upper_fp (they use PreserveParentBits).
-        return make_vn_lane_s(spec.n, spec.lane, fpr, /*zero_upper*/ false);
+        return make_vn_lane_s(spec.n, spec.lane, fpr);
 
     case detail::SubregisterSpec::Kind::V2dLane:
-        return make_vn_lane_d(spec.n, spec.lane, fpr, /*zero_upper*/ false);
+        return make_vn_lane_d(spec.n, spec.lane, fpr);
 
     case detail::SubregisterSpec::Kind::None:
     default:
@@ -230,7 +404,41 @@ std::optional<SubregisterView> Registers::make_subview_by_name(std::string_view 
     }
 }
 
-std::optional<uint64_t> Registers::read_sub_64(std::string_view name)
+// Direct subview construction from descriptor (avoids string round-trip).
+std::optional<SubregisterView> Registers::make_subview(const SubregisterDescriptor& desc) const
+{
+    // We cast away const on the parent structs because the factories need non-const
+    // references (they store mutable pointers for later writes). Creating the view
+    // itself does not mutate register state.
+    auto& mut_gpr = const_cast<user_pt_regs&>(gpr);
+    auto& mut_fpr = const_cast<user_fpsimd_state&>(fpr);
+
+    switch (desc.kind)
+    {
+    case SubregisterDescriptor::Kind::Wn:
+        return make_wn(desc.n, mut_gpr);
+
+    case SubregisterDescriptor::Kind::Sn:
+        // Standard scalar FP write behavior: zero the upper bits of the parent vector.
+        return make_sn(desc.n, mut_fpr, /*zero_upper*/ true);
+
+    case SubregisterDescriptor::Kind::Dn:
+        return make_dn(desc.n, mut_fpr, /*zero_upper*/ true);
+
+    case SubregisterDescriptor::Kind::V4sLane:
+        // Lane writes must preserve other lanes (and upper bits).
+        return make_vn_lane_s(desc.n, desc.lane, mut_fpr);
+
+    case SubregisterDescriptor::Kind::V2dLane:
+        return make_vn_lane_d(desc.n, desc.lane, mut_fpr);
+
+    case SubregisterDescriptor::Kind::None:
+    default:
+        return std::nullopt;
+    }
+}
+
+std::optional<uint64_t> Registers::read_sub_u64(std::string_view name)
 {
     auto sub = make_subview_by_name(name);
     if (!sub.has_value())

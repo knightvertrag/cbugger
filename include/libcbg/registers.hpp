@@ -12,6 +12,7 @@
 #include <libcbg/subregister_view.hpp>
 #include <asm/ptrace.h>
 #include <optional>
+#include <variant>
 
 namespace cbg
 {
@@ -59,7 +60,28 @@ namespace cbg
         size_t index;
     };
 
-    
+    // === Unified name resolution handle (std::variant based) ===
+    // A RegisterHandle can represent either a full architectural register or
+    // a subregister view (wN, sN, dN, vN.lane, etc.). This allows callers to
+    // resolve a name once and then use the handle for format-aware operations
+    // (parsing values, reading/writing, pretty printing) without repeated
+    // make_subview_by_name checks.
+    struct FullRegisterDescriptor { size_t index; };
+
+    // Carries enough information to identify a subregister without
+    // needing the original string name for most operations.
+    struct SubregisterDescriptor {
+        enum class Kind { None, Wn, Sn, Dn, V4sLane, V2dLane };
+        Kind       kind = Kind::None;
+        uint8_t    n    = 0;
+        uint8_t    lane = 0;
+
+        // Cached for fast access (populated at resolution time)
+        RegisterFormat format   = RegisterFormat::U64;
+        uint16_t       bit_size = 0;
+    };
+
+    using RegisterHandle = std::variant<FullRegisterDescriptor, SubregisterDescriptor>;
 
     class Registers
     {
@@ -83,8 +105,37 @@ namespace cbg
         RegisterView &get_register(RegisterDescriptor d);
         void set_register(RegisterDescriptor d, uint64_t value);
 
+        // Unified name resolution returning a RegisterHandle (variant).
+        // This is the recommended way to resolve register/subregister names
+        // when you need format-aware behavior (read, write, parsing, etc.).
+        RegisterHandle resolve(std::string_view name) const;
+
+        // Metadata queries that work for both full registers and subregisters.
+        RegisterFormat get_format(const RegisterHandle& h) const;
+        size_t         get_bit_size(const RegisterHandle& h) const;
+
+        // Read / write using a previously resolved handle.
+        std::optional<uint64_t> read(const RegisterHandle& h) const;
+        void                    write(const RegisterHandle& h, uint64_t value);
+
+        // Single value parser driven purely by format + bit size.
+        // The recommended way to turn user input into bits for a target register/subregister.
+        static std::optional<uint64_t> parse_register_value(std::string_view text,
+                                                            RegisterFormat     fmt,
+                                                            size_t             bit_size);
+
         std::optional<SubregisterView> make_subview_by_name(std::string_view name, bool zero_upper_fp = true);
-        std::optional<uint64_t> read_sub_64(std::string_view name);
+
+        // Build a SubregisterView directly from a SubregisterDescriptor (preferred when you
+        // already have a resolved handle). Avoids string round-tripping.
+        //
+        // Uses the standard architectural write policy for the subregister kind:
+        //   - wN         → ZeroExtend32To64
+        //   - sN / dN    → ZeroUpperVector128   (normal scalar FP write behavior)
+        //   - vN.4s[k] / vN.2d[k] → PreserveParentBits (lane writes must not disturb siblings)
+        std::optional<SubregisterView> make_subview(const SubregisterDescriptor& desc) const;
+
+        std::optional<uint64_t> read_sub_u64(std::string_view name);
         bool write_sub_u32(std::string_view name, uint32_t value);
         bool write_sub_u64(std::string_view name, uint64_t value);
 

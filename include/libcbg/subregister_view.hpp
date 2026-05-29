@@ -56,8 +56,13 @@ namespace cbg
     };
 
     SubregisterView make_wn(uint8_t n, user_pt_regs &gpr);
-    SubregisterView make_sn(uint8_t n, user_fpsimd_state &fpr, bool zero_upper = false);
-    SubregisterView make_dn(uint8_t n, user_fpsimd_state &fpr, bool zero_upper = false);
-    SubregisterView make_vn_lane_s(uint8_t n, uint8_t lane, user_fpsimd_state &fpr, bool zero_upper = false);
-    SubregisterView make_vn_lane_d(uint8_t n, uint8_t lane, user_fpsimd_state &fpr, bool zero_upper = false);
+
+    // Scalar FP factories still accept the policy flag because the string-based
+    // API (make_subview_by_name) allows requesting non-standard "preserve" behavior.
+    SubregisterView make_sn(uint8_t n, user_fpsimd_state &fpr, bool zero_upper);
+    SubregisterView make_dn(uint8_t n, user_fpsimd_state &fpr, bool zero_upper);
+
+    // Lane factories no longer take the flag — lane views always use PreserveParentBits.
+    SubregisterView make_vn_lane_s(uint8_t n, uint8_t lane, user_fpsimd_state &fpr);
+    SubregisterView make_vn_lane_d(uint8_t n, uint8_t lane, user_fpsimd_state &fpr);
 }

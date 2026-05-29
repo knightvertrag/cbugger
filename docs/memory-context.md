@@ -2,9 +2,9 @@
 
 **Project**: cbugger — A simple Linux aarch64 debugger for C/C++ programs  
 **Mission**: Build a from-scratch ptrace-based debugger targeting Linux aarch64 (lp64 ABI), starting with solid process control and a rich register model, then layering higher-level debugging features.  
-**Last updated**: 2026-05-29 (after promotion of RegisterHandle + unified descriptor-based subregister path, handle read/write, and direct make_subview(SubregisterDescriptor))  
+**Last updated**: 2026-05-29 (after full RegisterHandle unification, CLI migration to resolve+handle read/write, direct make_subview(SubregisterDescriptor), and factory signature cleanup)  
 **Purpose**: Persistent AI / agent memory priming. Future sessions should read `Readme.md` + this file first to avoid re-exploring or making contradictory assumptions.  
-**Quick status**: Mid-stage. Core process lifecycle (launch/attach/resume/wait) and full AArch64 register access (GPR + FPR + HW debug + subregisters) are functional in the library. Subregister views (`wN`, `sN`/`dN`, `vN.4s[i]`/`vN.2d[i]`) with correct architectural write policies are complete and tested. A unified `RegisterHandle` (via `resolve(name)`) now provides a single entry point for both full registers and subregisters, with handle-based `read()`/`write()` and direct `make_subview(SubregisterDescriptor)`. The high-level CLI uses this model for data access. Memory access, breakpoints, and stepping remain unimplemented.
+**Quick status**: Mid-stage. Core process lifecycle (launch/attach/resume/wait) and full AArch64 register access (GPR + FPR + HW debug + subregisters) are functional in the library. Subregister views (`wN`, `sN`/`dN`, `vN.4s[i]`/`vN.2d[i]`) with correct architectural write policies are complete and tested. A unified `RegisterHandle` (via `resolve(name)`) is now the recommended path for both full registers and subregisters, with handle-based `read()`/`write()`, `get_format()`, `get_bit_size()`, and `parse_register_value()`. Direct `make_subview(SubregisterDescriptor)` eliminates string synthesis. The CLI (`tools/cbg.cpp`) has been migrated to the new model. Memory access, breakpoints, and stepping remain unimplemented.
 
 ---
 
@@ -26,25 +26,36 @@ The project has evolved iteratively:
 
 ```mermaid
 flowchart TD
-    CLI["tools/cbg.cpp\n(readline 'cbg> ' loop + full register commands)"] 
-    CLI -->|"Process::launch(path) or\nProcess::attach(pid)"| Process
+    CLI["tools/cbg.cpp<br>(readline 'cbg> ' loop + register commands)"]
+    Process["libcbg::Process<br>(owns Registers, lifetime & state)"]
+    Registers["Registers<br>load/save + resolve/read/write(handle)"]
+    RegisterHandle["RegisterHandle<br>variant&lt;Full, SubregisterDescriptor&gt;<br>resolve(name) → handle"]
+    Regsets["Kernel regsets<br>(NT_PRSTATUS / FPREGSET / HW_BREAK / HW_WATCH)"]
+    Views["std::vector&lt;RegisterView&gt;<br>(internal, from REGISTER_LIST)"]
+    SubregisterView["SubregisterView<br>+ WritePolicy"]
+    Pipe["Pipe<br>(pre-exec error reporting)"]
+    Linux["Linux kernel (aarch64)"]
+    StopReason["stop_reason<br>(EXITED / TERMINATED / STOPPED)"]
 
-    Process["libcbg::Process\n(pid, state, terminate_on_end, is_attached)"]
-    Process -->|"fork + ptrace(TRACEME) + execlp\nor ptrace(PTRACE_ATTACH)"| Linux["Linux kernel (aarch64)"]
+    CLI -->|"launch(path) / attach(pid)"| Process
+    Process -->|Pipe channel| Linux
+    Process -->|"fork + ptrace(TRACEME/ATTACH)"| Linux
     Process -->|resume / wait_on_signal| Linux
-    Process -->|"get_registers() → Registers"| Registers
+    Process -->|"get_registers() / write_back_registers()"| Registers
 
-    Registers["Registers (per-Process)\nload/save via regsets"]
-    Registers -->|"PTRACE_GETREGSET / SETREGSET\nNT_PRSTATUS, NT_FPREGSET,\nNT_ARM_HW_BREAK, NT_ARM_HW_WATCH"| Regsets["Kernel regsets\n(user_pt_regs, user_fpsimd_state,\nuser_hwdebug_state)"]
-    Registers -->|build_views() + REGISTER_LIST macro| Views["std::vector<RegisterView>\n+ optional<SubregisterView>"]
+    Registers -->|PTRACE_GET/SETREGSET| Regsets
+    Registers -->|"build_views() + REGISTER_LIST macro"| Views
+    Registers -->|"resolve(name)"| RegisterHandle
+    Registers -->|"read(handle) / write(handle)<br>parse_register_value() [recommended]"| RegisterHandle
+    Registers -->|"make_subview(desc) [preferred]<br>make_subview_by_name() [legacy]"| SubregisterView
 
-    Subregister["SubregisterView\n(bit_offset, bit_size, WritePolicy,\nparent pointer)"]
-    Subregister -->|read_u64 / write_u64 + policies\n(ZeroExtend32To64, ZeroUpperVector128, PreserveParentBits)| BitOps["128-bit bit manipulation\nfor wN, sN, dN, vN.lane views"]
+    SubregisterView -->|"read_u64/write_u64 + policies<br>(ZeroExtend32To64, ZeroUpperVector128, PreserveParentBits)"| BitOps["128-bit bit manipulation<br>for wN / sN/dN / vN.lanes"]
 
-    Linux -->|signals (SIGTRAP from test asm, etc.)| StopReason["stop_reason\n(EXITED / TERMINATED / STOPPED)"]
+    Linux -->|"signals (SIGTRAP etc.)"| StopReason
 
     style Process fill:#e6f3ff
     style Registers fill:#e6f3ff
+    style RegisterHandle fill:#fff8e1
 ```
 
 **Layers**:
@@ -56,8 +67,9 @@ flowchart TD
 - `process_state` + `stop_reason` — [include/libcbg/process.hpp:12](include/libcbg/process.hpp)
 - `RegisterView` (name, data pointers, size, format, dwarf_id) — [include/libcbg/registers.hpp:29](include/libcbg/registers.hpp)
 - `SubregisterView` + `WritePolicy` enum — [include/libcbg/subregister_view.hpp:8](include/libcbg/subregister_view.hpp)
-- `SubregisterSpec` + `parse_subregister_name` (internal parser for wN/sN/dN/vN.* syntax) — [include/libcbg/detail/register_name.hpp](include/libcbg/detail/register_name.hpp)
-- `RegisterHandle` (variant of `FullRegisterDescriptor` + `SubregisterDescriptor`) + unified `resolve()` / `read()` / `write()` API — [include/libcbg/registers.hpp](include/libcbg/registers.hpp)
+- `SubregisterSpec` + `parse_subregister_name` (internal parser) — [include/libcbg/detail/register_name.hpp](include/libcbg/detail/register_name.hpp)
+- `RegisterHandle` (variant&lt;FullRegisterDescriptor, SubregisterDescriptor&gt;) + `resolve()` / handle `read()` / `write()` / `parse_register_value()` — [include/libcbg/registers.hpp](include/libcbg/registers.hpp)
+- `RegisterDescriptor` (fast O(1) path for full registers) — [include/libcbg/registers.hpp](include/libcbg/registers.hpp)
 - `REGISTER_LIST(...)` macro — [include/libcbg/detail/register.inc:9](include/libcbg/detail/register.inc)
 
 ---
@@ -75,7 +87,7 @@ flowchart TD
 | Hardware debug registers (16 BRK + 16 WPT) | ✅   | `NT_ARM_HW_BREAK` / `NT_ARM_HW_WATCH` [src/registers.cpp:59,66] | Raw addr + ctrl loaded/saved (sizes computed from `dbg_info`). |
 | Register read/write via views (`get_register`, `set_register`) | ✅ | [include/libcbg/registers.hpp:74](include/libcbg/registers.hpp), [src/registers.cpp:122] | Templated `get<T>()` / `set<T>()`. |
 | Subregister views (wN, sN, dN, vN.lanes) | ✅        | `make_subview_by_name` + factories + `SubregisterView` [src/registers.cpp:172], [src/subregister_view.cpp:1] + dedicated test | Full support for `wN` (zero-extend), scalar `sN`/`dN` (zero-upper), and vector lanes (`vN.4s[i]`, `vN.2d[i]` with preserve). `read_sub_*`/`write_sub_*` helpers + `write_back_registers()` also implemented. Passing Catch2 coverage. |
-| Full register CLI (read/write + subregisters + formatting) | ✅ | `handle_register_command` + helpers in [tools/cbg.cpp] | `register read [name|all]`, `register write <name> <val>`, `regs`, `info registers`. Supports all subregister forms. Value-syntax driven float vs integer writes (GDB-like). Pretty printing with bit patterns + float interp for scalars. Stop reason printed on every continue. Prompt is now `cbg>`. |
+| Full register CLI (read/write + subregisters + formatting) | ✅ | `handle_register_read` / `write` + helpers in [tools/cbg.cpp] | Migrated to `resolve()` + `RegisterHandle` read/write. `register read [name|all]`, `register write <name> <val>`, `regs`, `info registers`. All subregister forms. Value-syntax driven float vs integer. Rich pretty printing. Uses `RegisterDescriptor` for hot summary paths. Stop reason on continue. Prompt `cbg>`. |
 | Memory peek/poke                     | ❌        | —                                                   | No `PTRACE_PEEKDATA`, `process_vm_readv`, etc. yet. |
 | Software breakpoints / single-step   | ❌        | —                                                   | No `PTRACE_SINGLESTEP` or trap insertion. |
 | High-level HW breakpoint/watchpoint API | ❌     | Raw reg access only [include/libcbg/detail/register.inc:82] | No helpers to arm `dbg_regs[].ctrl` (BAS, PMC, E, etc.). |
@@ -115,7 +127,7 @@ A lightweight `RegisterDescriptor` (obtained once via `Registers::lookup(name)`)
 ### Current gaps in the register layer (precise locations)
 - Minor: `set_register` for 16-byte registers [src/registers.cpp:162](src/registers.cpp) takes a `uint64_t value` and casts it — loses the upper bits the caller probably wanted (unchanged from prior state).
 - No higher-level helpers yet for convenient subregister access from the CLI or for SVE/SME registers (future work).
-- The `RegisterHandle` + descriptor path for subregisters is still relatively new; higher-level conveniences (e.g. typed `read<T>()` on handles, richer pretty-printing integration) are still evolving.
+- Higher-level conveniences on top of `RegisterHandle` (typed `read<T>()`, richer pretty-printing integration, ergonomic handle construction) are still evolving. The core unification is complete.
 
 ---
 
@@ -178,7 +190,7 @@ A lightweight `RegisterDescriptor` (obtained once via `Registers::lookup(name)`)
 
 Recent work (most recent first; some changes may still be uncommitted working-tree state):
 
-- **RegisterHandle unification (late May 2026)**: Promoted `RegisterHandle` (std::variant of `FullRegisterDescriptor` + `SubregisterDescriptor`), `resolve(name)`, handle-based `read()`/`write()`, and direct `make_subview(const SubregisterDescriptor&)` out of `experimental`. `set_register(std::string)` now fully supports subs via the descriptor path. CLI migrated to primarily use the unified handle for data movement. Added `parse_register_value()` helper and comprehensive tests. This completes the move from dual string-based paths to a single descriptor-driven model for both full registers and subregisters.
+- **RegisterHandle unification (late May 2026)**: Promoted `RegisterHandle` (std::variant<FullRegisterDescriptor, SubregisterDescriptor>), `resolve(name)`, handle-based `read()`/`write()`, `get_format()`, `get_bit_size()`, and static `parse_register_value()` out of experimental. Added direct `make_subview(const SubregisterDescriptor&)` (no more synthetic "wN" strings). Cleaned `SubregisterView` factory signatures (`make_wn` + lane factories no longer take `zero_upper`). Migrated the entire CLI (`tools/cbg.cpp`) to the new unified path + `RegisterDescriptor` fast paths for printing. Extracted name parsing to `detail::`. Expanded tests to 78 assertions. This is the completion of the long-running register/subregister unification effort.
 - **Register CLI wiring (2026-05)**: Full `register read` / `register write` commands wired in `tools/cbg.cpp`, including all subregister forms (`wN`, `sN`/`dN`, `vN.4s[k]`, `vN.2d[k]`). Value-syntax-based float vs raw-bit write decisions (GDB-like). Rich pretty-printing (raw hex + float interpretation for scalars). `regs` / `info registers` convenience commands. Stop-reason printing on every `continue` / `c`. Prompt changed to `cbg>`. `write_back_registers()` integrated. Extensive manual testing against trap targets.
 - **CLI + register layer cleanup (late May 2026)**: Split monolithic `handle_register_command` into focused read/write handlers. Unified `Registers::set_register(std::string, uint64_t)` to handle both full registers and all subregister forms. Made the hottest CLI paths (`regs`, summary printers) use the `RegisterDescriptor` fast path. Extracted subregister name parsing (`wN`/`sN`/`dN`/`vN.*` grammar) into a dedicated `detail/register_name` unit, dramatically shrinking `registers.cpp`.
 - Subregister completion (2026-02): Full implementation of `wN`, `sN`/`dN`, and `vN.4s[i]`/`vN.2d[i]` support. Fixed `parse_index`, implemented all factories (`make_wn` et al.), completed `make_subview_by_name` parser, added `read_sub_*`/`write_sub_*` helpers, refactored `SubregisterView` bit math for correct policy application (especially after-insert zeroing), added comprehensive Catch2 coverage, and implemented `Process::write_back_registers()`. All subregister assertions now pass.

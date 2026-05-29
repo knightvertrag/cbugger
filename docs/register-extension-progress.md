@@ -2,7 +2,7 @@
 
 **Project**: cbugger — Linux aarch64 ptrace debugger  
 **Purpose**: Track the current state and planned evolution of the register subsystem.  
-**Last updated**: 2026-05-28 (after CLI + register layer cleanup: unified set_register for subs + extraction of name parsing)
+**Last updated**: 2026-05-29 (after RegisterHandle unification: resolve + handle-based read/write + direct make_subview(SubregisterDescriptor) + factory signature cleanup)
 
 ---
 
@@ -35,16 +35,19 @@ This document tracks how far we have come and what the major extension areas are
 |---------------------------|------------|-------|
 | String lookup (`get_register(name)`) | ✅ Mature | Linear scan on first use. Used everywhere in CLI and tests. |
 | Subregister syntax (`make_subview_by_name`) | ✅ Mature | Supports `wN`, `sN`/`dN`, `vN.4s[k]`, `vN.2d[k]`. Correct policies implemented and tested. |
-| `RegisterDescriptor` fast path | ✅ New (May 2026) | `lookup(name)` returns a stable handle. Subsequent access is O(1) via index. Additive — string API unchanged. |
+| Unified `RegisterHandle` (via `resolve(name)`) | ✅ New (late May 2026) | `std::variant<FullRegisterDescriptor, SubregisterDescriptor>`. Single entry point for both full registers and subregisters. Powers handle-based `read()` / `write()`, `get_format()`, `get_bit_size()`, and `parse_register_value()`. |
+| Direct descriptor `make_subview(SubregisterDescriptor)` | ✅ New (late May 2026) | Avoids synthetic name strings (e.g. "w" + n) when you already have a resolved subregister spec. |
+| `RegisterDescriptor` fast path | ✅ Mature | `lookup(name)` for full registers only. O(1) after initial resolution. |
 | Numeric / Dwarf ID access | Partial | `dwarf_id` is stored but not used for lookup. |
 
-### Recent Milestone
+### Recent Milestones
+- **late May 2026**: Major unification step. Promoted `RegisterHandle` (variant of `FullRegisterDescriptor` + `SubregisterDescriptor`) out of experimental. Added `resolve(name)`, handle-based `read()`/`write()`, `get_format()`/`get_bit_size()`, and static `parse_register_value()`. Introduced direct `make_subview(const SubregisterDescriptor&)` to eliminate string-synthesis hacks in hot paths. Cleaned factory signatures (`make_wn` and lane factories no longer take `zero_upper`; only scalar FP retain it as escape hatch for legacy string API). Migrated CLI (`tools/cbg.cpp`) to the new unified handle paths. Comprehensive test expansion (78 assertions).
 - **May 2026**: Added minimal `RegisterDescriptor` + `lookup()` / fast overloads. This directly addressed the long-standing "linear scan on repeated lookups" gap noted in `memory-context.md`.
 
 ### Limitations (Current)
-- Subregisters are still purely string-driven (by design — they are parametric).
-- Initial `lookup(name)` still does a linear scan (descriptors only help *after* resolution).
-- Subregister syntax parsing (`wN`/`sN`/`dN`/`vN.*`) lives in a dedicated internal unit (`detail/register_name.hpp` + `.cpp`) for maintainability; it is not yet exposed as a public typed API.
+- Subregister syntax parsing (`wN`/`sN`/`dN`/`vN.*`) lives in a dedicated internal unit (`detail/register_name.hpp` + `.cpp`) for maintainability; it is not yet exposed as a public typed API (only via `resolve()` and the legacy string path).
+- The new `RegisterHandle` + descriptor path is the recommended route for new code, but the original string-based API (`get_register(name)`, `make_subview_by_name`) remains fully supported for compatibility.
+- Initial `lookup(name)` for full registers still does a linear scan (descriptors only help *after* resolution).
 - No SVE, SME, or other architectural extensions.
 - HW debug registers are only available as raw fields (no high-level arming API).
 - No register groups/categories for better organization or CLI presentation.
@@ -122,7 +125,7 @@ The goal is **not** to replace the string API, but to provide compile-time safe 
 
 - [memory-context.md](memory-context.md) — Overall project state and roadmap
 - `include/libcbg/detail/register.inc` — Current register table
-- `include/libcbg/registers.hpp` — Public register API (including unified set_register for subs)
+- `include/libcbg/registers.hpp` — Public register API (RegisterHandle, resolve, handle read/write, direct make_subview, parse_register_value, etc.)
 - `include/libcbg/detail/register_name.hpp` — Internal subregister name parser (SubregisterSpec)
 - `src/registers.cpp` — Implementation of lookup, descriptor, and set_register logic
 

@@ -2,7 +2,7 @@
 
 **Project**: cbugger — Linux aarch64 ptrace debugger  
 **Purpose**: Track the current state and planned evolution of the register subsystem.  
-**Last updated**: 2026-05-28 (after introduction of `RegisterDescriptor` fast path)
+**Last updated**: 2026-05-28 (after CLI + register layer cleanup: unified set_register for subs + extraction of name parsing)
 
 ---
 
@@ -44,6 +44,7 @@ This document tracks how far we have come and what the major extension areas are
 ### Limitations (Current)
 - Subregisters are still purely string-driven (by design — they are parametric).
 - Initial `lookup(name)` still does a linear scan (descriptors only help *after* resolution).
+- Subregister syntax parsing (`wN`/`sN`/`dN`/`vN.*`) lives in a dedicated internal unit (`detail/register_name.hpp` + `.cpp`) for maintainability; it is not yet exposed as a public typed API.
 - No SVE, SME, or other architectural extensions.
 - HW debug registers are only available as raw fields (no high-level arming API).
 - No register groups/categories for better organization or CLI presentation.
@@ -121,8 +122,9 @@ The goal is **not** to replace the string API, but to provide compile-time safe 
 
 - [memory-context.md](memory-context.md) — Overall project state and roadmap
 - `include/libcbg/detail/register.inc` — Current register table
-- `include/libcbg/registers.hpp` — Public register API
-- `src/registers.cpp` — Implementation of lookup and descriptor logic
+- `include/libcbg/registers.hpp` — Public register API (including unified set_register for subs)
+- `include/libcbg/detail/register_name.hpp` — Internal subregister name parser (SubregisterSpec)
+- `src/registers.cpp` — Implementation of lookup, descriptor, and set_register logic
 
 ---
 

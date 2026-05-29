@@ -69,6 +69,12 @@ namespace cbg
         void save();
         const RegisterView &get_register(const std::string &name) const;
         RegisterView &get_register(const std::string &name);
+
+        // Sets the value of a full register or subregister by name.
+        // Full registers are resolved via the REGISTER_LIST (xN, vN, fpsr, pc,
+        // brk_*, watch_*, etc.). Subregister forms (wN, sN/dN, vN.4s[k],
+        // vN.2d[k]) are supported by delegating internally to
+        // make_subview_by_name() + the appropriate WritePolicy.
         void set_register(const std::string &name, uint64_t value);
 
         // === Minimal fast-path descriptor API (additive, string API unchanged) ===

@@ -2,9 +2,9 @@
 
 **Project**: cbugger — A simple Linux aarch64 debugger for C/C++ programs  
 **Mission**: Build a from-scratch ptrace-based debugger targeting Linux aarch64 (lp64 ABI), starting with solid process control and a rich register model, then layering higher-level debugging features.  
-**Last updated**: 2026-05-28 (after CLI handler split, unified set_register for subs, RegisterDescriptor usage in hot paths, and extraction of register name parsing)  
+**Last updated**: 2026-05-29 (after promotion of RegisterHandle + unified descriptor-based subregister path, handle read/write, and direct make_subview(SubregisterDescriptor))  
 **Purpose**: Persistent AI / agent memory priming. Future sessions should read `Readme.md` + this file first to avoid re-exploring or making contradictory assumptions.  
-**Quick status**: Mid-stage. Core process lifecycle (launch/attach/resume/wait) and full AArch64 register access (GPR + FPR + HW debug + subregisters) are functional in the library. Subregister views (`wN`, `sN`/`dN`, `vN.4s[i]`/`vN.2d[i]`) with correct architectural write policies are complete and tested. The high-level CLI now has substantial register inspection and mutation support (`register read`/`write`, `regs`, subregister views including float/int handling for lanes, and stop-reason printing). Memory access, breakpoints, and stepping remain unimplemented.
+**Quick status**: Mid-stage. Core process lifecycle (launch/attach/resume/wait) and full AArch64 register access (GPR + FPR + HW debug + subregisters) are functional in the library. Subregister views (`wN`, `sN`/`dN`, `vN.4s[i]`/`vN.2d[i]`) with correct architectural write policies are complete and tested. A unified `RegisterHandle` (via `resolve(name)`) now provides a single entry point for both full registers and subregisters, with handle-based `read()`/`write()` and direct `make_subview(SubregisterDescriptor)`. The high-level CLI uses this model for data access. Memory access, breakpoints, and stepping remain unimplemented.
 
 ---
 
@@ -57,6 +57,7 @@ flowchart TD
 - `RegisterView` (name, data pointers, size, format, dwarf_id) — [include/libcbg/registers.hpp:29](include/libcbg/registers.hpp)
 - `SubregisterView` + `WritePolicy` enum — [include/libcbg/subregister_view.hpp:8](include/libcbg/subregister_view.hpp)
 - `SubregisterSpec` + `parse_subregister_name` (internal parser for wN/sN/dN/vN.* syntax) — [include/libcbg/detail/register_name.hpp](include/libcbg/detail/register_name.hpp)
+- `RegisterHandle` (variant of `FullRegisterDescriptor` + `SubregisterDescriptor`) + unified `resolve()` / `read()` / `write()` API — [include/libcbg/registers.hpp](include/libcbg/registers.hpp)
 - `REGISTER_LIST(...)` macro — [include/libcbg/detail/register.inc:9](include/libcbg/detail/register.inc)
 
 ---
@@ -109,12 +110,12 @@ This is the most sophisticated part of the current codebase (heavy focus of comm
 - Subregister views solve the common debugger problem of "when user says `w20` or `s5`, what bits actually move and what gets zeroed in the parent register?"
 - Write policies (`ZeroExtend32To64`, `ZeroUpperVector128`, `PreserveParentBits`) encode ARM architectural rules cleanly.
 
-A lightweight `RegisterDescriptor` (obtained once via `Registers::lookup(name)`) now provides true O(1) access to full registers for hot paths, while the original string-based API remains the primary surface for the CLI and subregisters (following the same "string + cached handle" pattern used by GDB).
+A lightweight `RegisterDescriptor` (obtained once via `Registers::lookup(name)`) provides O(1) access for full registers. A first-class `RegisterHandle` (obtained via the unified `Registers::resolve(name)`) now represents *both* full registers and subregisters, enabling handle-based `read()` / `write()` and direct `make_subview(const SubregisterDescriptor&)` construction. This unifies the previous dual string-based paths while preserving the original `RegisterView` / `SubregisterView` implementations.
 
 ### Current gaps in the register layer (precise locations)
 - Minor: `set_register` for 16-byte registers [src/registers.cpp:162](src/registers.cpp) takes a `uint64_t value` and casts it — loses the upper bits the caller probably wanted (unchanged from prior state).
 - No higher-level helpers yet for convenient subregister access from the CLI or for SVE/SME registers (future work).
-- The fast `RegisterDescriptor` path is currently only for full registers; subregisters remain string-only (by design).
+- The `RegisterHandle` + descriptor path for subregisters is still relatively new; higher-level conveniences (e.g. typed `read<T>()` on handles, richer pretty-printing integration) are still evolving.
 
 ---
 
@@ -177,6 +178,7 @@ A lightweight `RegisterDescriptor` (obtained once via `Registers::lookup(name)`)
 
 Recent work (most recent first; some changes may still be uncommitted working-tree state):
 
+- **RegisterHandle unification (late May 2026)**: Promoted `RegisterHandle` (std::variant of `FullRegisterDescriptor` + `SubregisterDescriptor`), `resolve(name)`, handle-based `read()`/`write()`, and direct `make_subview(const SubregisterDescriptor&)` out of `experimental`. `set_register(std::string)` now fully supports subs via the descriptor path. CLI migrated to primarily use the unified handle for data movement. Added `parse_register_value()` helper and comprehensive tests. This completes the move from dual string-based paths to a single descriptor-driven model for both full registers and subregisters.
 - **Register CLI wiring (2026-05)**: Full `register read` / `register write` commands wired in `tools/cbg.cpp`, including all subregister forms (`wN`, `sN`/`dN`, `vN.4s[k]`, `vN.2d[k]`). Value-syntax-based float vs raw-bit write decisions (GDB-like). Rich pretty-printing (raw hex + float interpretation for scalars). `regs` / `info registers` convenience commands. Stop-reason printing on every `continue` / `c`. Prompt changed to `cbg>`. `write_back_registers()` integrated. Extensive manual testing against trap targets.
 - **CLI + register layer cleanup (late May 2026)**: Split monolithic `handle_register_command` into focused read/write handlers. Unified `Registers::set_register(std::string, uint64_t)` to handle both full registers and all subregister forms. Made the hottest CLI paths (`regs`, summary printers) use the `RegisterDescriptor` fast path. Extracted subregister name parsing (`wN`/`sN`/`dN`/`vN.*` grammar) into a dedicated `detail/register_name` unit, dramatically shrinking `registers.cpp`.
 - Subregister completion (2026-02): Full implementation of `wN`, `sN`/`dN`, and `vN.4s[i]`/`vN.2d[i]` support. Fixed `parse_index`, implemented all factories (`make_wn` et al.), completed `make_subview_by_name` parser, added `read_sub_*`/`write_sub_*` helpers, refactored `SubregisterView` bit math for correct policy application (especially after-insert zeroing), added comprehensive Catch2 coverage, and implemented `Process::write_back_registers()`. All subregister assertions now pass.

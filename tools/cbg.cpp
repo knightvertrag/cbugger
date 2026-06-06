@@ -38,15 +38,16 @@ namespace
         if (args.size() == 1)
         {
             std::cerr << R"(Available commands:
-            continue (c)            Resume the process (to next bp or signal)
-            step (s, si)            Single-step one instruction
-            break (b) <addr>        Set software breakpoint at hex address (e.g. b 0x1040)
-            delete (d) <id>         Delete breakpoint by id
-            info breakpoints        List breakpoints
-            regs / info registers   Show registers
-            register read [name|all]
-            register write <name> <value> (0x... ok for 128-bit vN)
-            help register           Help for register subcommands)";
+continue (c)            Resume the process (to next bp or signal)
+step (s, si)            Single-step one instruction
+break (b) <addr>        Set software breakpoint at hex address (e.g. b 0x1040)
+delete (d) <id>         Delete breakpoint by id
+info breakpoints        List breakpoints
+info registers   Show registers
+register read [name|all]
+register write <name> <value> (0x... ok for 128-bit vN)
+help register           Help for register subcommands
+)";
         }
         else if (is_prefix(args[1], "register"))
         {
@@ -59,7 +60,8 @@ info breakpoints             list active breakpoints with ids
 b / break <addr>             set SW bp (addr hex); returns id
 d / delete <id>              remove bp by id
 s / step / si                single step one instr (respects bps)
-c / continue                 resume + show stop reason (stops at bps)";
+c / continue                 resume + show stop reason (stops at bps)
+)";
         }
         else
         {
@@ -120,7 +122,7 @@ c / continue                 resume + show stop reason (stops at bps)";
             return;
         auto command = args[0];
 
-        if (is_prefix(command, "continue") || command == "c")
+        if (is_prefix(command, "continue"))
         {
             process->resume();
             auto reason = process->wait_on_signal();
@@ -128,34 +130,34 @@ c / continue                 resume + show stop reason (stops at bps)";
             print_breakpoint_hit_if_any(process);
             // On natural exit the Process already cleared pid_ and printed a message.
         }
-        else if (is_prefix(command, "step") || command == "s" || command == "si")
+        else if (is_prefix(command, "step"))
         {
             auto reason = process->step_instruction();
             std::cout << stop_reason_str(reason) << "\n";
             print_breakpoint_hit_if_any(process);
         }
-        else if (is_prefix(command, "break") || command == "b")
+        else if (is_prefix(command, "breakpoints"))
         {
             handle_break_command(process, args);
         }
-        else if (is_prefix(command, "delete") || command == "d")
+        else if (is_prefix(command, "delete"))
         {
             handle_delete_command(process, args);
         }
-        else if (is_prefix(command, "info") && args.size() > 1 && is_prefix(args[1], "break"))
+        else if (is_prefix(command, "info") && args.size() > 1 && is_prefix(args[1], "breakpoints"))
         {
             handle_info_breakpoints(process);
         }
-        else if (is_prefix(command, "register") || is_prefix(command, "reg"))
+        else if (is_prefix(command, "register"))
         {
             handle_register_command(process, args);
         }
-        else if (is_prefix(command, "regs") ||
-                 (is_prefix(command, "info") && args.size() > 1 && is_prefix(args[1], "reg")))
+        else if (is_prefix(command, "registers") ||
+                 (is_prefix(command, "info") && args.size() > 1 && is_prefix(args[1], "registers")))
         {
             // Convenience: "regs" or "info registers" / "info reg"
             std::vector<std::string> normalized{"register", "read", "all"};
-            if (is_prefix(command, "regs") && args.size() > 1)
+            if (is_prefix(command, "registers") && args.size() > 1)
             {
                 // allow "regs x0" etc.
                 normalized = {"register", "read", args[1]};

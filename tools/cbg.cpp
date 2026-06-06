@@ -11,6 +11,7 @@
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <cstring>
+#include <variant>
 #include <libcbg/process.hpp>
 #include <libcbg/error.hpp>
 #include <sys/user.h>
@@ -29,20 +30,28 @@ namespace
         if (args.size() == 1)
         {
             std::cerr << R"(Available commands:
-            continue (c)            Resume the process
+            continue (c)            Resume the process (to next bp or signal)
+            step (s, si)            Single-step one instruction
+            break (b) <addr>        Set software breakpoint at hex address (e.g. b 0x1040)
+            delete (d) <id>         Delete breakpoint by id
+            info breakpoints        List breakpoints
             regs / info registers   Show registers
             register read [name|all]
-            register write <name> <value>
+            register write <name> <value> (0x... ok for 128-bit vN)
             help register           Help for register subcommands)";
         }
         else if (is_prefix(args[1], "register"))
         {
             std::cerr << R"(register read [name|all]     e.g. register read x0, w19, v3.4s[2], pc
-register write <name> <val>  value can be decimal, 0x..., or float for s/d views
+register write <name> <val>  value can be decimal, 0x... (up to 32 hex digits/128-bit for full vN), or float for s/d views
 regs                         shorthand for 'register read all'
 regs <name>                  shorthand for 'register read <name>'
 info registers
-c / continue                 resume + show stop reason)";
+info breakpoints             list active breakpoints with ids
+b / break <addr>             set SW bp (addr hex); returns id
+d / delete <id>              remove bp by id
+s / step / si                single step one instr (respects bps)
+c / continue                 resume + show stop reason (stops at bps)";
         }
         else
         {
@@ -82,6 +91,10 @@ c / continue                 resume + show stop reason)";
     void handle_register_command(std::unique_ptr<cbg::Process> &process, const std::vector<std::string> &args);
     void handle_register_read(std::unique_ptr<cbg::Process> &process, const std::vector<std::string> &args);
     void handle_register_write(std::unique_ptr<cbg::Process> &process, const std::vector<std::string> &args);
+    void handle_break_command(std::unique_ptr<cbg::Process> &process, const std::vector<std::string> &args);
+    void handle_delete_command(std::unique_ptr<cbg::Process> &process, const std::vector<std::string> &args);
+    void handle_info_breakpoints(std::unique_ptr<cbg::Process> &process);
+    void print_breakpoint_hit_if_any(std::unique_ptr<cbg::Process> &process);
 
     void handle_command(std::unique_ptr<cbg::Process> &process, std::string_view line)
     {
@@ -95,7 +108,26 @@ c / continue                 resume + show stop reason)";
             process->resume();
             auto reason = process->wait_on_signal();
             std::cout << stop_reason_str(reason) << "\n";
+            print_breakpoint_hit_if_any(process);
             // On natural exit the Process already cleared pid_ and printed a message.
+        }
+        else if (is_prefix(command, "step") || command == "s" || command == "si")
+        {
+            auto reason = process->step_instruction();
+            std::cout << stop_reason_str(reason) << "\n";
+            print_breakpoint_hit_if_any(process);
+        }
+        else if (is_prefix(command, "break") || command == "b")
+        {
+            handle_break_command(process, args);
+        }
+        else if (is_prefix(command, "delete") || command == "d")
+        {
+            handle_delete_command(process, args);
+        }
+        else if (is_prefix(command, "info") && args.size() > 1 && is_prefix(args[1], "break"))
+        {
+            handle_info_breakpoints(process);
         }
         else if (is_prefix(command, "register") || is_prefix(command, "reg"))
         {
@@ -319,16 +351,16 @@ c / continue                 resume + show stop reason)";
 
             if (auto val = regs.read(h))
             {
-                // For nice display we still branch on whether it's a subregister
-                // (SubregisterView gives us the best float interpretation + policy view).
-                // This is the remaining necessary use of make_subview_by_name for presentation.
-                if (auto sub = regs.make_subview_by_name(name))
+                // Use SubregisterDescriptor (from unified resolve) + get_subregister (consistent
+                // with get_register for full) for sub view. (Avoids legacy make_subview_by_name.)
+                // Full registers (incl. 128-bit vN) use descriptor view for print.
+                if (auto* sd = std::get_if<cbg::SubregisterDescriptor>(&h))
                 {
-                    print_subregister_value(name, *sub);
+                    auto sv = regs.get_subregister(*sd);
+                    print_subregister_value(name, sv);
                 }
                 else
                 {
-                    // Full register path using the old descriptor for now
                     auto d = regs.lookup(name);
                     const auto &rv = regs.get_register(d);
                     print_register_value(name, rv);
@@ -367,7 +399,7 @@ c / continue                 resume + show stop reason)";
             std::cerr << "Invalid value '" << valstr << "' for register/subregister '" << name << "'\n";
             return;
         }
-        uint64_t raw = *opt_raw;
+        __uint128_t raw = *opt_raw;
 
         try
         {
@@ -377,10 +409,12 @@ c / continue                 resume + show stop reason)";
 
             std::cout << "Wrote " << name << " <- " << valstr << "\n";
 
-            // Re-display using the nicest view (sub for FP interpretation, otherwise full)
-            if (auto sub = regs.make_subview_by_name(name))
+            // Re-display using the nicest view (sub for FP interpretation, otherwise full).
+            // Use get_subregister (consistent with get_register for fulls).
+            if (auto* sd = std::get_if<cbg::SubregisterDescriptor>(&h))
             {
-                print_subregister_value(name, *sub);
+                auto sv = regs.get_subregister(*sd);
+                print_subregister_value(name, sv);
             }
             else
             {
@@ -420,6 +454,95 @@ c / continue                 resume + show stop reason)";
         {
             std::cerr << "Unknown register subcommand '" << sub << "'. Use read or write.\n";
         }
+    }
+
+    uint64_t parse_addr(const std::string &s)
+    {
+        if (s.empty())
+            cbg::Error::send("Empty address for breakpoint");
+        char *end = nullptr;
+        uint64_t v = std::strtoull(s.c_str(), &end, 0);
+        if (end == s.c_str() || *end != '\0')
+            cbg::Error::send("Invalid breakpoint address: " + s);
+        return v;
+    }
+
+    void handle_break_command(std::unique_ptr<cbg::Process> &process, const std::vector<std::string> &args)
+    {
+        if (args.size() < 2)
+        {
+            std::cerr << "Usage: break <addr>   (or b 0x...)\n";
+            return;
+        }
+        std::string addrstr = args[1];
+        if (args.size() >= 3)
+            addrstr = args[2]; // allow "break 0x.." or "b 0x.."
+        try
+        {
+            uint64_t addr = parse_addr(addrstr);
+            int id = process->add_breakpoint(addr);
+            std::cout << "Breakpoint " << id << " at 0x" << std::hex << addr << std::dec << "\n";
+        }
+        catch (const cbg::Error &e)
+        {
+            std::cerr << e.what() << "\n";
+        }
+    }
+
+    void handle_delete_command(std::unique_ptr<cbg::Process> &process, const std::vector<std::string> &args)
+    {
+        if (args.size() < 2)
+        {
+            std::cerr << "Usage: delete <id>   (or d <id>)\n";
+            return;
+        }
+        try
+        {
+            int id = std::stoi(args.size() >= 3 ? args[2] : args[1]);
+            if (process->remove_breakpoint(id))
+                std::cout << "Deleted breakpoint " << id << "\n";
+            else
+                std::cerr << "No breakpoint with id " << id << "\n";
+        }
+        catch (...)
+        {
+            std::cerr << "Invalid breakpoint id\n";
+        }
+    }
+
+    void handle_info_breakpoints(std::unique_ptr<cbg::Process> &process)
+    {
+        auto bps = process->get_breakpoints();
+        if (bps.empty())
+        {
+            std::cout << "No breakpoints.\n";
+            return;
+        }
+        std::cout << "Num     Addr\n";
+        for (auto [id, addr] : bps)
+        {
+            std::cout << std::setw(3) << id << "   0x" << std::hex << addr << std::dec << "\n";
+        }
+    }
+
+    void print_breakpoint_hit_if_any(std::unique_ptr<cbg::Process> &process)
+    {
+        try
+        {
+            auto &regs = process->get_registers();
+            auto d = regs.lookup("pc");
+            uint64_t pc = regs.get_register(d).get<uint64_t>();
+            auto bps = process->get_breakpoints();
+            for (auto [id, addr] : bps)
+            {
+                if (addr == pc)
+                {
+                    std::cout << "(hit breakpoint " << id << ")\n";
+                    break;
+                }
+            }
+        }
+        catch (...) {}
     }
 }
 

@@ -2,9 +2,11 @@
 
 **Project**: cbugger — A simple Linux aarch64 debugger for C/C++ programs  
 **Mission**: Build a from-scratch ptrace-based debugger targeting Linux aarch64 (lp64 ABI), starting with solid process control and a rich register model, then layering higher-level debugging features.  
-**Last updated**: 2026-06-04 (after API consistency cleanup: get_subregister now returns SubregisterView like get_register returns RegisterView (eliminating value-vs-view confusion); string-name set_register/set_subregister overloads removed; get/set now consistently descriptor-based or via unified handle; registers.cpp reorganized with clear section separators; get_subregister(string/desc) added for view access)  
+**Last updated**: 2026-06 (after breakpoint implementation and encapsulation: memory primitives, full SW breakpoints with transparent step-over + PC rewind, high-level HW breakpoint API, CLI commands, tests, deletion of legacy debugger.hpp, and extraction of breakpoint logic into dedicated `Breakpoints` class using Pimpl idiom for better encapsulation and compilation firewall).  
 **Purpose**: Persistent AI / agent memory priming. Future sessions should read `Readme.md` + this file first to avoid re-exploring or making contradictory assumptions.  
-**Quick status**: Mid-stage. Core process lifecycle (launch/attach/resume/wait) and full AArch64 register access (GPR + FPR + HW debug + subregisters, with full 128-bit vN) are functional. Subregister views (`wN`, `sN`/`dN`, `vN.4s[i]`/`vN.2d[i]`) with policies complete and tested. Unified `RegisterHandle` (resolve + read/write) is recommended for values; `get_register`/`get_subregister` (name or desc) return Views for structured access (full 128-bit via __uint128_t on views or handle). String `get_register` for full remains (for convenience); string `set_*` removed. `make_subview(desc)` preferred over by_name. CLI uses handle + views. No memory access, sw breakpoints, or high-level HW debug API yet. registers.cpp reorganized for navigation.
+**Quick status**: Mid-stage. Core process lifecycle (launch/attach/resume/wait) and full AArch64 register access (GPR + FPR + HW debug + subregisters, with full 128-bit vN) are functional. Subregister views (`wN`, `sN`/`dN`, `vN.4s[i]`/`vN.2d[i]`) with policies complete and tested. Unified `RegisterHandle` (resolve + read/write) is recommended for values; `get_register`/`get_subregister` (name or desc) return Views for structured access (full 128-bit via __uint128_t on views or handle). String `get_register` for full remains (for convenience); string `set_*` removed. `make_subview(desc)` preferred over by_name. CLI uses handle + views.
+
+Memory access primitives (`Process::read_memory` / `write_memory`) are implemented (word-based via ptrace PEEKDATA/POKEDATA). Full software breakpoints + single-step (transparent step-over, original instruction restore, PC rewind for classic "stopped at bp" presentation, dtor hygiene to avoid leaving traps) and high-level hardware breakpoint/watchpoint API (slot allocation, E/PMC/BAS/BT control bits, integration with raw debug regsets) are complete. Breakpoint logic has been extracted from `Process` into a dedicated internal `Breakpoints` class (using Pimpl for encapsulation and reduced header dependencies). CLI supports `break`/`b`, `delete`/`d`, `info breakpoints`, and `step`/`s`. Tests cover the flows (~110 assertions). Legacy `debugger.hpp` deleted.
 
 ---
 
@@ -26,8 +28,9 @@ The project has evolved iteratively:
 
 ```mermaid
 flowchart TD
-    CLI["tools/cbg.cpp<br>(readline 'cbg> ' loop + register commands)"]
-    Process["libcbg::Process<br>(owns Registers, lifetime & state)"]
+    CLI["tools/cbg.cpp<br>(readline 'cbg> ' loop + register + breakpoint commands)"]
+    Process["libcbg::Process<br>(owns Registers + Breakpoints, lifetime & state, control pump)"]
+    Breakpoints["Breakpoints (internal)<br>(SW sites + step-over protocol, HW arming, Pimpl Impl, dtor restore)"]
     Registers["Registers<br>load/save + resolve/read/write(handle)"]
     RegisterHandle["RegisterHandle<br>variant&lt;Full, SubregisterDescriptor&gt;<br>resolve(name) → handle"]
     Regsets["Kernel regsets<br>(NT_PRSTATUS / FPREGSET / HW_BREAK / HW_WATCH)"]
@@ -40,8 +43,10 @@ flowchart TD
     CLI -->|"launch(path) / attach(pid)"| Process
     Process -->|Pipe channel| Linux
     Process -->|"fork + ptrace(TRACEME/ATTACH)"| Linux
-    Process -->|resume / wait_on_signal| Linux
+    Process -->|resume / wait_on_signal / step_instruction| Linux
     Process -->|"get_registers() / write_back_registers()"| Registers
+    Process -->|"delegates: add/remove/step-over prepare/rearm, enable_hw, restore" | Breakpoints
+    Breakpoints -->|"uses memory r/w, get_registers(), write_back" | Process
 
     Registers -->|PTRACE_GET/SETREGSET| Regsets
     Registers -->|"build_views() + REGISTER_LIST macro"| Views
@@ -55,16 +60,18 @@ flowchart TD
 
     style Process fill:#e6f3ff
     style Registers fill:#e6f3ff
+    style Breakpoints fill:#e6f3ff
     style RegisterHandle fill:#fff8e1
 ```
 
 **Layers**:
-- **Presentation**: `tools/cbg.cpp` (libedit readline, rich command dispatch including `register read`/`write`, `regs`, subregister formatting, and stop-reason printing).
-- **Core Library** (`libcbg`): `Process`, `Registers`, `RegisterView`, `SubregisterView`, `Pipe`, `Error`.
+- **Presentation**: `tools/cbg.cpp` (libedit readline, rich command dispatch including `register read`/`write`, `regs`, breakpoint commands (`b`/`break`, `d`/`delete`, `info breakpoints`, `step`/`s`), subregister formatting, and stop-reason printing).
+- **Core Library** (`libcbg`): `Process` (owns lifetime, control pump, and delegates to), `Breakpoints` (internal, owns SW/HW breakpoint state + step-over policy via Pimpl), `Registers`, `RegisterView`, `SubregisterView`, `Pipe`, `Error`.
 - **OS Interaction**: Direct `ptrace(2)`, `waitpid`, `kill`, regset iovec calls. No higher abstractions (no `libunwind`, no `libdw` yet).
 
 **Key data structures** (with locations):
 - `process_state` + `stop_reason` — [include/libcbg/process.hpp:12](include/libcbg/process.hpp)
+- `Breakpoints` (internal, owns SW sites, step-over protocol via prepare/rearm, HW arming; uses Pimpl `Impl`) + `Process::breakpoints_` — [include/libcbg/breakpoints.hpp](include/libcbg/breakpoints.hpp), [include/libcbg/process.hpp](include/libcbg/process.hpp)
 - `RegisterView` (name, data pointers, size, format, dwarf_id) — [include/libcbg/registers.hpp:29](include/libcbg/registers.hpp)
 - `SubregisterView` + `WritePolicy` enum — [include/libcbg/subregister_view.hpp:8](include/libcbg/subregister_view.hpp)
 - `SubregisterSpec` + `parse_subregister_name` (internal parser) — [include/libcbg/detail/register_name.hpp](include/libcbg/detail/register_name.hpp)
@@ -101,7 +108,7 @@ flowchart TD
 - Register r/w round-trips via asm `trap` targets — [test/tests.cpp:83](test/tests.cpp), [test/targets/register_*.s](test/targets/)
 - Subregister views, policies, and helpers (wN zero-extend, sN/dN zero-upper, lane preserve, error cases) + get_subregister — dedicated test case in [test/tests.cpp](test/tests.cpp) (~30 assertions in sub test alone)
 - Handle-based read/write, resolve, parse, 128-bit vN full access — [test/tests.cpp:306](test/tests.cpp) (RegisterHandle test)
-- CLI register commands exercised manually against trap targets (full automated CLI testing thin). Total ~95 assertions across 12 cases.
+- Software breakpoints (add/remove, memory restore, transparent hit + step-over with PC rewind), HW breakpoint API, step_instruction — dedicated cases in [test/tests.cpp](test/tests.cpp) (15+ assertions in breakpoint tests). Total ~110 assertions across 14 cases. CLI breakpoint commands exercised manually.
 
 ---
 
@@ -162,16 +169,16 @@ A lightweight `RegisterDescriptor` (obtained once via `Registers::lookup(name)`)
 **Note**: Previous critical subregister gaps (parse_index, factories, make_subview_by_name) fully resolved. String set_* overloads removed. `get_subregister` (string/desc) now returns SubregisterView (consistent with get_register returning View; raw value via view or handle.read). Legacy uint64 set overloads + read/write_sub_* removed. registers.cpp reorganized. Sub support (handle + views + string compat) complete and tested.
 
 **Behavioral / API gaps**:
-- No memory access primitives exposed.
-- HW debug registers are raw r/w only; no `enable_breakpoint(addr, size)` helper that correctly programs the control registers per ARM ARM.
 - Destructor [src/process.cpp:105](src/process.cpp) has complex attached-vs-launched logic; easy to get wrong on double-detach or already-exited processes.
-- CLI has no persistent command history across sessions or tab completion for register names yet.
+- CLI has no persistent command history across sessions or tab completion for register/breakpoint names yet.
+- Watchpoint support is minimal (high-level API exists for breakpoints; full value-based watchpoints are future).
 
 **Minor / polish**:
 - No string `set_*` (by design; use handle for string names). `get_register(string)` for full remains (linear scan on first use; CLI uses desc fast path for hot summaries).
 - No `const` correctness or caching around repeated `get_register(string)` lookups (linear scan). (Interactive CLI demonstrates `RegisterDescriptor` for "regs"/summaries.)
 - Error messages sometimes use `send_errno` even when errno is not the issue.
-- CLI could benefit from better formatting for 128-bit vectors and pstate bit decoding. No persistent history or tab completion for register names yet.
+- CLI could benefit from better formatting for 128-bit vectors and pstate bit decoding. No persistent history or tab completion for register or breakpoint names yet.
+- Breakpoint manager currently uses a `Process&` backpointer + prepare/rearm protocol for single-step cooperation (keeps raw ptrace/waitpid in Process while owning policy).
 
 ---
 
@@ -187,12 +194,16 @@ A lightweight `RegisterDescriptor` (obtained once via `Registers::lookup(name)`)
 
 5. **Macro-driven register table** — Single source of truth for names, struct fields, formats, and dwarf IDs. Easy to add SVE Z registers later.
 
+6. **Breakpoints extracted to dedicated class with Pimpl** — After initial implementation inside `Process`, breakpoint state (SW sites + original words, id allocation), step-over policy (prepare/rearm protocol for transparent handling + PC rewind), and high-level HW arming were moved to `Breakpoints` (with Pimpl `Impl` in the .cpp). This avoids god-class growth in `Process`, provides a compilation firewall (heavy includes like `<unordered_map>` and ptrace headers stay out of the public header), and follows the separation recommended during initial planning. `Process` owns the instance, the control pump (`wait_on_signal`, `step_instruction`, dtor), and exposes a stable public facade; `Breakpoints` owns policy and uses the owner for memory/Registers/write_back services. See also `docs/breakpoint-progress.md`.
+
 ---
 
 ## History & Momentum
 
 Recent work (most recent first; some changes may still be uncommitted working-tree state):
 
+- **Breakpoint encapsulation + Pimpl (2026-06)**: Breakpoint logic (previously implemented directly in `Process`) extracted to dedicated internal `Breakpoints` class (`include/libcbg/breakpoints.hpp` + `src/breakpoints.cpp`). Uses classic Pimpl (`class Impl; std::unique_ptr<Impl>`) for strong encapsulation and compilation firewall. `Process` now delegates public API and integrates via prepare/rearm protocol for step-over + dtor restore. Updated memory-context and created `breakpoint-progress.md`. Legacy `include/debugger.hpp` deleted per review.
+- **Full breakpoints implementation (prior to encapsulation)**: Memory primitives (`read_memory`/`write_memory` via PTRACE_PEEK/POKE), software breakpoints with transparent step-over (restore orig, SINGLESTEP, re-insert BRK, PC rewind), `step_instruction()`, high-level HW breakpoint API (enable/disable using debug regsets + control bits), CLI commands (`b`/`break`, `d`/`delete`, `info breakpoints`, `step`), and tests. `debugger.hpp` deletion also performed.
 - **API consistency + get_subregister as View + registers.cpp reorg (2026-06)**: `get_subregister(name/desc)` finalized to return SubregisterView (fully consistent with `get_register` returning RegisterView; eliminates value-vs-view confusion). String-name overloads for `set_register`/`set_subregister` removed (handle + desc only; string gets for full remain for convenience). `get_subregister`/`set_subregister` encapsulate sub view logic (parallel to full). registers.cpp reorganized with distinct //==== separators (core, getters/views, setters, resolution, handle ops, parse, factories) for navigation. CLI uses get_subregister for sub display. Updated all context docs. register model now very mature and consistent.
 - **RegisterHandle unification (late May 2026)**: Promoted `RegisterHandle` (std::variant<FullRegisterDescriptor, SubregisterDescriptor>), `resolve(name)`, handle-based `read()`/`write()`, `get_format()`, `get_bit_size()`, and static `parse_register_value()` out of experimental. Added direct `make_subview(const SubregisterDescriptor&)` (no more synthetic "wN" strings). Cleaned `SubregisterView` factory signatures (`make_wn` + lane factories no longer take `zero_upper`). Migrated the entire CLI (`tools/cbg.cpp`) to the new unified path + `RegisterDescriptor` fast paths for printing. Extracted name parsing to `detail::`. Expanded tests to 78 assertions. This is the completion of the long-running register/subregister unification effort.
 - **128-bit Vn handling + set API cleanup (2026-06)**: Addressed truncation limitations for full vector registers (v0–v31) in the recommended unified path. `read(RegisterHandle)` / `write(RegisterHandle, __uint128_t)` / `parse_register_value` now use and preserve full 128-bit values for Vec128 (long 0x hex input supported for writes). Removed string name overloads for `set_register`/`set_subregister` (not necessary; use resolve+write or desc+set_*). `set_register` (desc) only for full regs. Sub writes via set_subregister(desc,u64). CLI updated to use get_subregister for subs. Legacy make_subview_by_name uses minimized internally; old read/write_sub_* and value-only get_sub removed. Updated tests/docs. The "minor gap" for 128-bit set_register is resolved for the RegisterHandle API.
@@ -214,22 +225,21 @@ Experiments/ (adrp.s, ldr.s, ...) show ongoing investigation of aarch64 addressi
 
 ## Recommended Next Steps / Roadmap (Prioritized)
 
-**Subregister support, 128-bit full vN register support via the unified handle API, and basic-to-good register CLI are now complete** (including factories, parser, helpers, policy-correct writes, value-syntax float/int handling for lanes, rich printing, stop-reason output, and `write_back_registers()` integration). The highest-leverage remaining items (as of post-breakpoint implementation) are:
+**Subregister support, 128-bit full vN register support via the unified handle API, basic-to-good register CLI, memory primitives, and full breakpoint support (SW + HW + encapsulation) are now complete.**
 
-1. **(done)** Memory access primitives + full SW + HW breakpoint support (including transparent step-over for SW bps, PC rewind presentation, dtor hygiene for SW sites, high-level enable/disable on the raw debug regsets, CLI integration, and tests) are now complete.
+The highest-leverage remaining items are:
 
-2. Symbolication / DWARF / source correlation (libdw) for "break main", source stepping, etc.
+1. Symbolication / DWARF / source correlation (libdw) for "break main", source stepping, etc.
 
-3. SVE/SME register extensions, richer watchpoint support (value match, etc.), and robustness for threads/forks.
+2. SVE/SME register extensions, richer watchpoint support (value match, etc.), and robustness for threads/forks.
 
-4. **Polish & robustness**:
-   - Clean up orphaned `debugger.hpp`.
-   - No more legacy uint64 set paths (string sets removed; __uint128_t + handle fully address vN). 
+3. **Polish & robustness**:
    - Better error handling after natural exit.
-   - Improved CLI (tab completion for register names, better vector formatting, command history persistence).
-   - Optional: expose subregister access more ergonomically from the public API.
+   - Improved CLI (tab completion for register/breakpoint names, better vector formatting, command history persistence).
+   - Optional: expose subregister access or a `Breakpoints&` view more ergonomically from the public API (currently stable facade on `Process` is preferred).
+   - Consider evolving the `Breakpoints` backpointer to a narrower service interface if the coupling feels too broad in the future.
 
-5. **Later** (when the above feels solid): DWARF line info + symbols (libdw), source stepping, watchpoint value latching, SVE/SME register support, etc.
+4. **Later** (when the above feels solid): DWARF line info + symbols (libdw), source stepping, watchpoint value latching, SVE/SME register support, etc.
 
 ---
 
@@ -244,6 +254,7 @@ CMakePresets.json
 dockerfile
 examples/hello_world.cpp
 include/libcbg/bit.hpp
+include/libcbg/breakpoints.hpp
 include/libcbg/detail/register.inc
 include/libcbg/detail/register_name.hpp
 include/libcbg/error.hpp
@@ -253,6 +264,7 @@ include/libcbg/registers.hpp
 include/libcbg/subregister_view.hpp
 Readme.md
 src/CMakeLists.txt
+src/breakpoints.cpp
 src/pipe.cpp
 src/process.cpp
 src/register_name.cpp
@@ -275,7 +287,7 @@ vcpkg.json
 ### How to refresh this document
 - Re-run the "summarize current state into memory-context" task (or ask a fresh agent to do so after reading this file + the plan.md that produced it).
 - Or manually update the "Last updated" date + the specific sections that have changed.
-- After any large register, process, or CLI change, the **Quick status**, **Feature Matrix**, **Known Gaps**, and **Recommended Next Steps** sections should be re-validated first.
+- After any large register, process, CLI, or breakpoint change (including encapsulation into `Breakpoints`), the **Quick status**, **Feature Matrix**, **Known Gaps**, **Architecture diagram**, **History**, and **Recommended Next Steps** sections should be re-validated first. Also update or create `docs/breakpoint-progress.md` for detailed breakpoint state.
 
 ---
 

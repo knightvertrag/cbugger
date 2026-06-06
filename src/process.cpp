@@ -11,8 +11,16 @@
 #include <fmt/format.h>
 #include <libcbg/pipe.hpp>
 
+// =============================================================================
+// process.cpp - Process lifecycle, execution control, memory, and facade APIs
+// =============================================================================
+
 namespace
 {
+    // -------------------------------------------------------------------------
+    // Anonymous helpers (launch child error reporting + pretty stop reason)
+    // -------------------------------------------------------------------------
+
     void exit_with_perror(cbg::Pipe &channel, std::string const &prefix)
     {
         auto message = prefix + ": " + std::strerror(errno);
@@ -86,6 +94,10 @@ std::unique_ptr<cbg::Process> cbg::Process::launch(const std::filesystem::path &
     return proc;
 }
 
+// -----------------------------------------------------------------------------
+// Process lifecycle (attach + private ctor + dtor)
+// -----------------------------------------------------------------------------
+
 std::unique_ptr<cbg::Process> cbg::Process::attach(pid_t pid)
 {
     if (pid <= 0)
@@ -141,6 +153,10 @@ cbg::Process::~Process()
     }
 }
 
+// -----------------------------------------------------------------------------
+// Execution control (resume, stop_reason, wait_on_signal, step_instruction)
+// -----------------------------------------------------------------------------
+
 void cbg::Process::resume()
 {
     spdlog::debug("Resuming process with PID {}", pid_);
@@ -155,6 +171,10 @@ void cbg::Process::resume()
     state_ = process_state::RUNNING;
     spdlog::debug("Process state after resume: {}", static_cast<int>(state_));
 }
+
+// -----------------------------------------------------------------------------
+// stop_reason construction (from waitpid status)
+// -----------------------------------------------------------------------------
 
 cbg::stop_reason::stop_reason(int wait_status)
 {
@@ -175,6 +195,7 @@ cbg::stop_reason::stop_reason(int wait_status)
     }
 }
 
+// wait_on_signal + transparent SW breakpoint step-over handling (delegates to Breakpoints)
 cbg::stop_reason cbg::Process::wait_on_signal()
 {
     spdlog::debug("Waiting for process to be signalled");
@@ -224,66 +245,8 @@ cbg::stop_reason cbg::Process::wait_on_signal()
     return reason;
 }
 
-void cbg::Process::read_all_registers() 
-{
-    get_registers().load();
-}
-
-void cbg::Process::write_back_registers()
-{
-    if (registers_)
-        registers_->save();
-}
-
-uint64_t cbg::Process::read_memory(uint64_t addr)
-{
-    if (pid_ == 0)
-    {
-        Error::send("Process not initialized");
-    }
-    errno = 0;
-    long word = ptrace(PTRACE_PEEKDATA, pid_, reinterpret_cast<void *>(addr), nullptr);
-    if (word == -1 && errno != 0)
-    {
-        Error::send_errno("Failed to read memory at 0x" + std::to_string(addr));
-    }
-    return static_cast<uint64_t>(word);
-}
-
-void cbg::Process::write_memory(uint64_t addr, uint64_t value)
-{
-    if (pid_ == 0)
-    {
-        Error::send("Process not initialized");
-    }
-    if (ptrace(PTRACE_POKEDATA, pid_, reinterpret_cast<void *>(addr), reinterpret_cast<void *>(value)) == -1)
-    {
-        Error::send_errno("Failed to write memory at 0x" + std::to_string(addr));
-    }
-}
-
-// --- Breakpoint delegations (facade kept for API compatibility) ---
-
-int cbg::Process::add_breakpoint(uint64_t addr)
-{
-    return breakpoints_->add_breakpoint(addr);
-}
-
-bool cbg::Process::remove_breakpoint(int id)
-{
-    return breakpoints_->remove_breakpoint(id);
-}
-
-bool cbg::Process::remove_breakpoint(uint64_t addr)
-{
-    return breakpoints_->remove_breakpoint(addr);
-}
-
-std::vector<std::pair<int, uint64_t>> cbg::Process::get_breakpoints() const
-{
-    return breakpoints_->get_breakpoints();
-}
-
+// step_instruction lives in execution control because it performs a controlled
+// single step (with transparent bp handling) and waits for the result.
 cbg::stop_reason cbg::Process::step_instruction()
 {
     if (pid_ == 0)
@@ -324,6 +287,76 @@ cbg::stop_reason cbg::Process::step_instruction()
     }
 
     return reason;
+}
+
+// -----------------------------------------------------------------------------
+// Register load/save (thin wrappers over Registers)
+// -----------------------------------------------------------------------------
+
+void cbg::Process::read_all_registers() 
+{
+    get_registers().load();
+}
+
+void cbg::Process::write_back_registers()
+{
+    if (registers_)
+        registers_->save();
+}
+
+// -----------------------------------------------------------------------------
+// Memory access (ptrace PEEK/POKE)
+// -----------------------------------------------------------------------------
+
+uint64_t cbg::Process::read_memory(uint64_t addr)
+{
+    if (pid_ == 0)
+    {
+        Error::send("Process not initialized");
+    }
+    errno = 0;
+    long word = ptrace(PTRACE_PEEKDATA, pid_, reinterpret_cast<void *>(addr), nullptr);
+    if (word == -1 && errno != 0)
+    {
+        Error::send_errno("Failed to read memory at 0x" + std::to_string(addr));
+    }
+    return static_cast<uint64_t>(word);
+}
+
+void cbg::Process::write_memory(uint64_t addr, uint64_t value)
+{
+    if (pid_ == 0)
+    {
+        Error::send("Process not initialized");
+    }
+    if (ptrace(PTRACE_POKEDATA, pid_, reinterpret_cast<void *>(addr), reinterpret_cast<void *>(value)) == -1)
+    {
+        Error::send_errno("Failed to write memory at 0x" + std::to_string(addr));
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Breakpoint API delegations (facade kept for API compatibility; impl in Breakpoints)
+// -----------------------------------------------------------------------------
+
+int cbg::Process::add_breakpoint(uint64_t addr)
+{
+    return breakpoints_->add_breakpoint(addr);
+}
+
+bool cbg::Process::remove_breakpoint(int id)
+{
+    return breakpoints_->remove_breakpoint(id);
+}
+
+bool cbg::Process::remove_breakpoint(uint64_t addr)
+{
+    return breakpoints_->remove_breakpoint(addr);
+}
+
+std::vector<std::pair<int, uint64_t>> cbg::Process::get_breakpoints() const
+{
+    return breakpoints_->get_breakpoints();
 }
 
 int cbg::Process::enable_hw_breakpoint(uint64_t addr)

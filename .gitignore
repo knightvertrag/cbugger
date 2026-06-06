@@ -4,3 +4,5 @@ build/
 .devcontainer/
 experiments/
 *.log
+# Example programs (not part of the library)
+examples/

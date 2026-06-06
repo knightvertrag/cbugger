@@ -8,10 +8,18 @@
 #include <sys/types.h>
 #include <signal.h>
 
+// =============================================================================
+// tests.cpp - Catch2 test suite for libcbg
+// =============================================================================
+
 using namespace cbg;
 
 namespace
 {
+    // -------------------------------------------------------------------------
+    // Test helpers (process liveness + /proc status)
+    // -------------------------------------------------------------------------
+
     bool process_exists(pid_t pid)
     {
         auto ret = kill(pid, 0);
@@ -28,6 +36,11 @@ namespace
         return data[status_indicator_index];
     }
 }
+
+// =============================================================================
+// Process lifecycle (launch, attach, resume, error paths)
+// =============================================================================
+
 TEST_CASE("Process::launch success", "[process]")
 {
     auto proc = Process::launch("yes", false);
@@ -79,6 +92,10 @@ TEST_CASE("Process::resume already terminated", "[process]")
     REQUIRE_THROWS_AS(proc->resume(), Error);
 
 }
+
+// =============================================================================
+// Register read / write (via targets + pipes)
+// =============================================================================
 
 TEST_CASE("Write register works", "[register]")
 {
@@ -135,6 +152,10 @@ TEST_CASE("Read register works", "[register]")
     // REQUIRE(v20 == 0x8765432187654321);
 
 }
+
+// =============================================================================
+// Subregister views, write policies, aliasing (wN/sN/dN/vN lanes)
+// =============================================================================
 
 TEST_CASE("Subregister views (wN/sN/dN + vN lanes) implement correct aliasing and write policies", "[subregister]")
 {
@@ -265,6 +286,10 @@ TEST_CASE("Subregister views (wN/sN/dN + vN lanes) implement correct aliasing an
     // No resume needed. The Process dtor will clean up the traced child.
 }
 
+// =============================================================================
+// Descriptor (O(1)) and Handle (unified full+sub read/write) APIs
+// =============================================================================
+
 TEST_CASE("RegisterDescriptor provides fast O(1) access equivalent to string lookup", "[register][descriptor]")
 {
     auto proc = Process::launch("targets/run_endlessly");
@@ -314,6 +339,10 @@ TEST_CASE("RegisterDescriptor provides fast O(1) access equivalent to string loo
     regs.set_register(d_brk, static_cast<__uint128_t>(0x0000AAAA00001234ULL));
     REQUIRE(regs.get_register("brk_addr3").get<uint64_t>() == 0x0000AAAA00001234ULL);
 }
+
+// =============================================================================
+// RegisterHandle unified resolve + read/write + parse_register_value
+// =============================================================================
 
 TEST_CASE("RegisterHandle provides unified resolve + read/write for full and sub registers", "[register][handle]")
 {
@@ -405,6 +434,7 @@ TEST_CASE("RegisterHandle provides unified resolve + read/write for full and sub
     REQUIRE(std::abs(f - 3.14159f) < 0.0001f);
 }
 
+// Additional direct tests for the value parser used by register write paths.
 TEST_CASE("parse_register_value handles integer and floating-point inputs correctly", "[register][parse]")
 {
     using cbg::RegisterFormat;
@@ -447,6 +477,10 @@ TEST_CASE("parse_register_value handles integer and floating-point inputs correc
     std::memcpy(&f64, &*f64_bits, sizeof(f64));
     REQUIRE(std::abs(f64 - 2.718281828) < 1e-9);
 }
+
+// =============================================================================
+// Software + Hardware breakpoint behavior
+// =============================================================================
 
 TEST_CASE("Software breakpoints: add/remove, memory restore, hit + step-over with PC rewind", "[breakpoint][sw]")
 {

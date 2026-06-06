@@ -16,8 +16,16 @@
 #include <libcbg/error.hpp>
 #include <sys/user.h>
 
+// =============================================================================
+// cbg.cpp - interactive command-line debugger (REPL over libcbg::Process)
+// =============================================================================
+
 namespace
 {
+    // -------------------------------------------------------------------------
+    // String / CLI utilities
+    // -------------------------------------------------------------------------
+
     bool is_prefix(std::string_view str, std::string_view of)
     {
         if (str.size() > of.size())
@@ -58,6 +66,7 @@ c / continue                 resume + show stop reason (stops at bps)";
             std::cerr << "No help available for this command\n";
         }
     }
+
     std::vector<std::string> split(std::string_view str, char delimiter)
     {
         std::vector<std::string> res{};
@@ -70,6 +79,10 @@ c / continue                 resume + show stop reason (stops at bps)";
         }
         return res;
     }
+
+    // -------------------------------------------------------------------------
+    // Process launch / attach
+    // -------------------------------------------------------------------------
 
     std::unique_ptr<cbg::Process> attach(int argc, const char **argv)
     {
@@ -95,6 +108,10 @@ c / continue                 resume + show stop reason (stops at bps)";
     void handle_delete_command(std::unique_ptr<cbg::Process> &process, const std::vector<std::string> &args);
     void handle_info_breakpoints(std::unique_ptr<cbg::Process> &process);
     void print_breakpoint_hit_if_any(std::unique_ptr<cbg::Process> &process);
+
+    // -------------------------------------------------------------------------
+    // Command dispatcher
+    // -------------------------------------------------------------------------
 
     void handle_command(std::unique_ptr<cbg::Process> &process, std::string_view line)
     {
@@ -155,7 +172,9 @@ c / continue                 resume + show stop reason (stops at bps)";
         }
     }
 
-    // --- New register + stop-reason support for wired CLI ---
+    // -------------------------------------------------------------------------
+    // Stop reason + hex formatting helpers
+    // -------------------------------------------------------------------------
 
     std::string stop_reason_str(cbg::stop_reason r)
     {
@@ -184,6 +203,10 @@ c / continue                 resume + show stop reason (stops at bps)";
         oss << "0x" << std::hex << std::setw(width) << std::setfill('0') << v;
         return oss.str();
     }
+
+    // -------------------------------------------------------------------------
+    // Register / subregister pretty printers + block dumps
+    // -------------------------------------------------------------------------
 
     void print_register_value(const std::string &name, const cbg::RegisterView &rv)
     {
@@ -306,6 +329,10 @@ c / continue                 resume + show stop reason (stops at bps)";
         print_fp_summary(regs);
     }
 
+    // -------------------------------------------------------------------------
+    // Value parsers (int / float) for register write
+    // -------------------------------------------------------------------------
+
     uint64_t parse_integer(const std::string &s)
     {
         if (s.empty())
@@ -328,6 +355,21 @@ c / continue                 resume + show stop reason (stops at bps)";
             cbg::Error::send("Invalid floating-point value: " + s);
         return d;
     }
+
+    uint64_t parse_addr(const std::string &s)
+    {
+        if (s.empty())
+            cbg::Error::send("Empty address for breakpoint");
+        char *end = nullptr;
+        uint64_t v = std::strtoull(s.c_str(), &end, 0);
+        if (end == s.c_str() || *end != '\0')
+            cbg::Error::send("Invalid breakpoint address: " + s);
+        return v;
+    }
+
+    // -------------------------------------------------------------------------
+    // Register command handlers (read / write + dispatch)
+    // -------------------------------------------------------------------------
 
     void handle_register_read(std::unique_ptr<cbg::Process> &process, const std::vector<std::string> &args)
     {
@@ -456,16 +498,10 @@ c / continue                 resume + show stop reason (stops at bps)";
         }
     }
 
-    uint64_t parse_addr(const std::string &s)
-    {
-        if (s.empty())
-            cbg::Error::send("Empty address for breakpoint");
-        char *end = nullptr;
-        uint64_t v = std::strtoull(s.c_str(), &end, 0);
-        if (end == s.c_str() || *end != '\0')
-            cbg::Error::send("Invalid breakpoint address: " + s);
-        return v;
-    }
+    // -------------------------------------------------------------------------
+    // Breakpoint command support (handle_break / delete / info + hit reporting)
+    // (parse_addr lives with the other value parsers above)
+    // -------------------------------------------------------------------------
 
     void handle_break_command(std::unique_ptr<cbg::Process> &process, const std::vector<std::string> &args)
     {
@@ -546,6 +582,10 @@ c / continue                 resume + show stop reason (stops at bps)";
     }
 }
 
+// =============================================================================
+// Top-level REPL, logging, and entry point (outside anon ns)
+// =============================================================================
+
 void main_loop(std::unique_ptr<cbg::Process> &process)
 {
     char *line = nullptr;
@@ -577,6 +617,10 @@ void main_loop(std::unique_ptr<cbg::Process> &process)
         }
     }
 }
+
+// -----------------------------------------------------------------------------
+// Logging setup + main
+// -----------------------------------------------------------------------------
 
 void log_setup()
 {

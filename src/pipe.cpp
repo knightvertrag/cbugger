@@ -4,6 +4,14 @@
 #include <libcbg/error.hpp>
 #include <libcbg/pipe.hpp>
 
+// =============================================================================
+// Pipe: simple bidirectional pipe wrapper (used for launch error channel)
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Construction / Destruction / Lifecycle
+// -----------------------------------------------------------------------------
+
 cbg::Pipe::Pipe(bool close_on_exec)
 {
     if (pipe2(fds_, close_on_exec ? O_CLOEXEC : 0) < 0)
@@ -16,16 +24,6 @@ cbg::Pipe::~Pipe()
 {
     close_read();
     close_write();
-}
-
-int cbg::Pipe::release_read()
-{
-    return std::exchange(fds_[READ_FD], -1);
-}
-
-int cbg::Pipe::release_write()
-{
-    return std::exchange(fds_[WRITE_FD], -1);
 }
 
 void cbg::Pipe::close_read()
@@ -45,6 +43,24 @@ void cbg::Pipe::close_write()
         fds_[WRITE_FD] = -1;
     }
 }
+
+// -----------------------------------------------------------------------------
+// File descriptor release (detach without closing)
+// -----------------------------------------------------------------------------
+
+int cbg::Pipe::release_read()
+{
+    return std::exchange(fds_[READ_FD], -1);
+}
+
+int cbg::Pipe::release_write()
+{
+    return std::exchange(fds_[WRITE_FD], -1);
+}
+
+// -----------------------------------------------------------------------------
+// I/O
+// -----------------------------------------------------------------------------
 
 std::vector<std::byte> cbg::Pipe::read()
 {

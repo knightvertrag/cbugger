@@ -9,8 +9,16 @@
 #include <unordered_map>
 #include <algorithm>
 
+// =============================================================================
+// breakpoints.cpp - SW + HW breakpoint management (pimpl in Breakpoints::Impl)
+// =============================================================================
+
 namespace cbg
 {
+
+// -----------------------------------------------------------------------------
+// Breakpoints::Impl - internal pimpl (owns all state + policy)
+// -----------------------------------------------------------------------------
 
 // Internal implementation (pimpl). All the state and policy that used to live
 // directly in Process now lives here.
@@ -20,6 +28,10 @@ public:
     explicit Impl(Process& owner)
         : owner_(owner)
     {}
+
+    // -------------------------------------------------------------------------
+    // SW breakpoint management (add / remove / enumerate)
+    // -------------------------------------------------------------------------
 
     int add_breakpoint(uint64_t addr)
     {
@@ -84,6 +96,10 @@ public:
         return res;
     }
 
+    // -------------------------------------------------------------------------
+    // Transparent step-over (SW bp) + explicit step support + site restore
+    // -------------------------------------------------------------------------
+
     std::optional<uint64_t> prepare_for_transparent_step_over(uint64_t current_pc)
     {
         auto it = sw_breakpoints_.find(current_pc);
@@ -138,7 +154,9 @@ public:
         bp_id_to_addr_.clear();
     }
 
-    // --- HW support (thin over Registers name-based views + write_back via owner) ---
+    // -------------------------------------------------------------------------
+    // HW breakpoint / watchpoint support (delegates to Registers views)
+    // -------------------------------------------------------------------------
 
     int enable_hw_breakpoint(uint64_t addr)
     {
@@ -215,6 +233,10 @@ public:
     }
 
 private:
+    // -------------------------------------------------------------------------
+    // Constants + HW control builders (private to Impl)
+    // -------------------------------------------------------------------------
+
     static constexpr uint32_t AARCH64_BRK_INSN = 0xd4200000u;
 
     // HW control bit builders (moved from the old anon namespace in process.cpp)
@@ -235,7 +257,9 @@ private:
     std::unordered_map<int, uint64_t> bp_id_to_addr_;
 };
 
-// --- Breakpoints public facade (pimpl forwarding) ---
+// -----------------------------------------------------------------------------
+// Breakpoints public facade (pimpl forwarding)
+// -----------------------------------------------------------------------------
 
 Breakpoints::Breakpoints(Process& owner)
     : impl_(std::make_unique<Impl>(owner))
@@ -273,6 +297,15 @@ void Breakpoints::rearm_and_rewind(uint64_t bp_loc)
     impl_->rearm_and_rewind(bp_loc);
 }
 
+void Breakpoints::restore_all_sw_sites()
+{
+    impl_->restore_all_sw_sites();
+}
+
+// -----------------------------------------------------------------------------
+// HW breakpoint API (facade)
+// -----------------------------------------------------------------------------
+
 int Breakpoints::enable_hw_breakpoint(uint64_t addr)
 {
     return impl_->enable_hw_breakpoint(addr);
@@ -281,11 +314,6 @@ int Breakpoints::enable_hw_breakpoint(uint64_t addr)
 void Breakpoints::disable_hw_breakpoint(int slot)
 {
     impl_->disable_hw_breakpoint(slot);
-}
-
-void Breakpoints::restore_all_sw_sites()
-{
-    impl_->restore_all_sw_sites();
 }
 
 int Breakpoints::num_hw_breakpoint_slots() const

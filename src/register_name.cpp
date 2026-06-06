@@ -1,7 +1,15 @@
 #include <libcbg/detail/register_name.hpp>
 
+// =============================================================================
+// register_name.cpp - subregister name parser (wN, sN, dN, vN.4s[l], vN.2d[l])
+// =============================================================================
+
 namespace
 {
+    // -------------------------------------------------------------------------
+    // Small helpers (local to this TU)
+    // -------------------------------------------------------------------------
+
     int is_digit(char c)
     {
         return c >= '0' && c <= '9';
@@ -24,6 +32,10 @@ namespace
 
 namespace cbg::detail
 {
+    // -------------------------------------------------------------------------
+    // Subregister name parser (public detail API)
+    // -------------------------------------------------------------------------
+
     SubregisterSpec parse_subregister_name(std::string_view name)
     {
         if (name.empty())

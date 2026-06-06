@@ -1,10 +1,16 @@
 #include <libcbg/subregister_view.hpp>
 #include <libcbg/error.hpp>
 
+// =============================================================================
+// subregister_view.cpp - non-owning views + read/write for wN/sN/dN/vN lanes
+// =============================================================================
+
 namespace cbg
 {
 
-// --- Factory functions (non-owning views into live reg structs) ---
+// -----------------------------------------------------------------------------
+// Factory functions (non-owning views into live reg structs)
+// -----------------------------------------------------------------------------
 
 SubregisterView make_wn(uint8_t n, user_pt_regs &gpr)
 {
@@ -71,7 +77,9 @@ SubregisterView make_vn_lane_d(uint8_t n, uint8_t lane, user_fpsimd_state &fpr)
     return sv;
 }
 
-// --- Reads ---
+// -----------------------------------------------------------------------------
+// Reads (u64/f32/f64)
+// -----------------------------------------------------------------------------
 
 uint64_t SubregisterView::read_u64() const
 {
@@ -112,7 +120,9 @@ double SubregisterView::read_f64() const
     return f;
 }
 
-// --- Writes ---
+// -----------------------------------------------------------------------------
+// Writes (core write_u64 + convenience u32/f32/f64 + policy handling)
+// -----------------------------------------------------------------------------
 
 void SubregisterView::write_u64(uint64_t value)
 {

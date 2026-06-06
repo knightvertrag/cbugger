@@ -6,10 +6,18 @@
 #include <asm/ptrace.h>
 #include <elf.h>
 
+// =============================================================================
+// registers.cpp - AArch64 register access via ptrace regsets + subregister views
+// =============================================================================
+
 using namespace cbg;
 
 namespace
 {
+    // -------------------------------------------------------------------------
+    // Internal helpers
+    // -------------------------------------------------------------------------
+
     size_t calc_debug_size(size_t dbg_info)
     {
         unsigned num_slots = dbg_info & 0xff;
@@ -19,22 +27,24 @@ namespace
     }
 }
 
+// -----------------------------------------------------------------------------
+// Core lifecycle (ctor + view construction)
+// -----------------------------------------------------------------------------
+
 Registers::Registers(pid_t pid) : pid(pid)
 {
     build_views();
 }
 
 // ============================================================================
-// registers.cpp - AArch64 register access via ptrace regsets + subregister views
-//
-// Sections (for navigation):
-//   - Core lifecycle + view build
+// Sections (for navigation — definition order in this file):
+//   - Core lifecycle + view build (ctor, load/save, build_views)
 //   - View getters (get_register / get_subregister)
+//   - Subview factories (make_subview_by_name / make_subview)   — used by getters + resolution
 //   - Value setters (set_register / set_subregister)
-//   - Name resolution (find/lookup/resolve)
-//   - Handle ops (format/bit_size/read/write)
-//   - Parsing user values
-//   - Subview factories
+//   - Name resolution (find_index / lookup / resolve)
+//   - Handle ops (get_format / get_bit_size / read / write)
+//   - Value parsing (parse_register_value)
 // ============================================================================
 
 // ============================================================================

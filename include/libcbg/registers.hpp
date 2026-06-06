@@ -92,18 +92,28 @@ namespace cbg
         const RegisterView &get_register(const std::string &name) const;
         RegisterView &get_register(const std::string &name);
 
-        // Sets the value of a full register or subregister by name.
-        // Full registers are resolved via the REGISTER_LIST (xN, vN, fpsr, pc,
-        // brk_*, watch_*, etc.). Subregister forms (wN, sN/dN, vN.4s[k],
-        // vN.2d[k]) are supported by delegating internally to
-        // make_subview_by_name() + the appropriate WritePolicy.
-        void set_register(const std::string &name, uint64_t value);
-
-        // === Minimal fast-path descriptor API (additive, string API unchanged) ===
+        // === Descriptor-based API for full/sub sets (fast path; string name overloads for set_register/set_subregister removed as unnecessary) ===
         RegisterDescriptor lookup(std::string_view name) const;
         const RegisterView &get_register(RegisterDescriptor d) const;
         RegisterView &get_register(RegisterDescriptor d);
-        void set_register(RegisterDescriptor d, uint64_t value);
+
+        // Set full register by descriptor (fast path after lookup/resolve).
+        // Use RegisterHandle write() via resolve() as the recommended unified path.
+        void set_register(RegisterDescriptor d, __uint128_t value);
+
+        // Set subregister by descriptor (after resolve/lookup).
+        // Subregisters are always <= 64 bits.
+        // Use the RegisterHandle write() path (via resolve()) as the recommended
+        // unified entry point (no string-name overloads for set_*; they were removed).
+        void set_subregister(const SubregisterDescriptor &desc, uint64_t value);
+
+        // Get subregister (its view for access) by name or descriptor (after resolve/lookup).
+        // Parallels get_register for full registers (which returns RegisterView& / ref to the view).
+        // Returns the View (not raw value bits; get value via sv.read_u64()/read_f*/read_subview_as etc.
+        // or via uniform handle.read(h) for both full and sub).
+        // Use RegisterHandle read() via resolve() as the recommended unified path for raw bits.
+        SubregisterView get_subregister(const std::string &name) const;
+        SubregisterView get_subregister(const SubregisterDescriptor &desc) const;
 
         // Unified name resolution returning a RegisterHandle (variant).
         // This is the recommended way to resolve register/subregister names
@@ -115,19 +125,24 @@ namespace cbg
         size_t         get_bit_size(const RegisterHandle& h) const;
 
         // Read / write using a previously resolved handle.
-        std::optional<uint64_t> read(const RegisterHandle& h) const;
-        void                    write(const RegisterHandle& h, uint64_t value);
+        // Full support for 128-bit values (Vec128 / full vN registers) via __uint128_t.
+        // Subregisters and GPR/FP scalars return values in the low bits.
+        // (get_subregister / set_subregister provide consistent view access for subs, parallel to fulls.)
+        std::optional<__uint128_t> read(const RegisterHandle& h) const;
+        void                       write(const RegisterHandle& h, __uint128_t value);
 
         // Single value parser driven purely by format + bit size.
         // The recommended way to turn user input into bits for a target register/subregister.
-        static std::optional<uint64_t> parse_register_value(std::string_view text,
-                                                            RegisterFormat     fmt,
-                                                            size_t             bit_size);
+        // Supports 128-bit hex values (up to 32 hex digits after 0x) for Vec128.
+        static std::optional<__uint128_t> parse_register_value(std::string_view text,
+                                                               RegisterFormat     fmt,
+                                                               size_t             bit_size);
 
         std::optional<SubregisterView> make_subview_by_name(std::string_view name, bool zero_upper_fp = true);
 
-        // Build a SubregisterView directly from a SubregisterDescriptor (preferred when you
-        // already have a resolved handle). Avoids string round-tripping.
+        // Get a SubregisterView for a subregister (by name or descriptor). Preferred over the
+        // make_subview* factories for "getting the subregister" (parallels get_register).
+        // make_subview(desc) is the internal builder (returns optional for flexibility in tests etc.).
         //
         // Uses the standard architectural write policy for the subregister kind:
         //   - wN         → ZeroExtend32To64
@@ -135,9 +150,10 @@ namespace cbg
         //   - vN.4s[k] / vN.2d[k] → PreserveParentBits (lane writes must not disturb siblings)
         std::optional<SubregisterView> make_subview(const SubregisterDescriptor& desc) const;
 
-        std::optional<uint64_t> read_sub_u64(std::string_view name);
-        bool write_sub_u32(std::string_view name, uint32_t value);
-        bool write_sub_u64(std::string_view name, uint64_t value);
+        // Hardware debug info from the NT_ARM_HW_BREAK / NT_ARM_HW_WATCH regsets.
+        // Low 8 bits give the number of implemented slots (BRP/WRP count). Valid after load().
+        uint32_t hw_breakpoint_info() const { return hw_break.dbg_info; }
+        uint32_t hw_watchpoint_info() const { return hw_watch.dbg_info; }
 
     private:
         pid_t pid;

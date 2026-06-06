@@ -24,6 +24,23 @@ Registers::Registers(pid_t pid) : pid(pid)
     build_views();
 }
 
+// ============================================================================
+// registers.cpp - AArch64 register access via ptrace regsets + subregister views
+//
+// Sections (for navigation):
+//   - Core lifecycle + view build
+//   - View getters (get_register / get_subregister)
+//   - Value setters (set_register / set_subregister)
+//   - Name resolution (find/lookup/resolve)
+//   - Handle ops (format/bit_size/read/write)
+//   - Parsing user values
+//   - Subview factories
+// ============================================================================
+
+// ============================================================================
+// Core: register load/save + internal view construction
+// ============================================================================
+
 void Registers::load()
 {
     spdlog::debug("Loading registers for PID {}", pid);
@@ -104,6 +121,10 @@ void Registers::build_views()
 #undef ADD_HWWATCH
 }
 
+// ============================================================================
+// Direct accessors: get the register/subregister *view* (for typed access)
+// ============================================================================
+
 const RegisterView &Registers::get_register(const std::string &name) const
 {
     for (auto &r : views)
@@ -124,235 +145,6 @@ RegisterView &Registers::get_register(const std::string &name)
     Error::send_errno("Register not found: " + name);
 }
 
-void Registers::set_register(const std::string &name, uint64_t value)
-{
-    spdlog::debug("Setting register {} to value {:#x}", name, value);
-
-    // Subregister path (wN, sN, dN, vN.4s[k], vN.2d[k]) — unified entry point
-    if (auto sub = make_subview_by_name(name))
-    {
-        sub->write_u64(value);
-        return;
-    }
-
-    // Full register path (xN, vN, pc, fpsr, brk_*, watch_*, etc.)
-    RegisterView &reg = get_register(name);
-    switch (reg.size)
-    {
-    case 1:
-        reg.set<uint8_t>(static_cast<uint8_t>(value));
-        break;
-    case 2:
-        reg.set<uint16_t>(static_cast<uint16_t>(value));
-        break;
-    case 4:
-        reg.set<uint32_t>(static_cast<uint32_t>(value));
-        break;
-    case 8:
-        reg.set<uint64_t>(value);
-        break;
-    case 16:
-    {
-        __uint128_t wide = value;
-        reg.set<__uint128_t>(static_cast<__uint128_t>(value));
-        break;
-    }
-
-    default:
-        Error::send("Unsupported register size for: " + name);
-    }
-}
-
-size_t Registers::find_index(std::string_view name) const
-{
-    for (size_t i = 0; i < views.size(); ++i)
-    {
-        if (views[i].name == name)
-            return i;
-    }
-    Error::send_errno("Register not found: " + std::string(name));
-}
-
-RegisterDescriptor Registers::lookup(std::string_view name) const
-{
-    return { find_index(name) };
-}
-
-RegisterHandle Registers::resolve(std::string_view name) const
-{
-    // Try full register first (fast path + stable index)
-    for (size_t i = 0; i < views.size(); ++i)
-    {
-        if (views[i].name == name)
-        {
-            return FullRegisterDescriptor{i};
-        }
-    }
-
-    // Subregister
-    auto spec = detail::parse_subregister_name(name);
-    if (spec.kind != detail::SubregisterSpec::Kind::None)
-    {
-        SubregisterDescriptor sd;
-        using K = SubregisterDescriptor::Kind;
-
-        switch (spec.kind)
-        {
-        case detail::SubregisterSpec::Kind::Wn:      sd.kind = K::Wn;      break;
-        case detail::SubregisterSpec::Kind::Sn:      sd.kind = K::Sn;      break;
-        case detail::SubregisterSpec::Kind::Dn:      sd.kind = K::Dn;      break;
-        case detail::SubregisterSpec::Kind::V4sLane: sd.kind = K::V4sLane; break;
-        case detail::SubregisterSpec::Kind::V2dLane: sd.kind = K::V2dLane; break;
-        default:                                     sd.kind = K::None;    break;
-        }
-        sd.n    = spec.n;
-        sd.lane = spec.lane;
-
-        // Populate cached format + bit_size using the descriptor directly
-        // (no string reconstruction / round-trip through make_subview_by_name).
-        if (auto sv = make_subview(sd))
-        {
-            sd.format   = sv->format;
-            sd.bit_size = sv->bit_size;
-        }
-
-        return sd;
-    }
-
-    Error::send_errno("Register or subregister not found: " + std::string(name));
-}
-
-RegisterFormat Registers::get_format(const RegisterHandle& h) const
-{
-    return std::visit([this](auto&& desc) -> RegisterFormat {
-        using T = std::decay_t<decltype(desc)>;
-        if constexpr (std::is_same_v<T, FullRegisterDescriptor>)
-        {
-            return views[desc.index].format;
-        }
-        else if constexpr (std::is_same_v<T, SubregisterDescriptor>)
-        {
-            return desc.format;   // cached at resolve time
-        }
-        return RegisterFormat::U64;
-    }, h);
-}
-
-size_t Registers::get_bit_size(const RegisterHandle& h) const
-{
-    return std::visit([this](auto&& desc) -> size_t {
-        using T = std::decay_t<decltype(desc)>;
-        if constexpr (std::is_same_v<T, FullRegisterDescriptor>)
-        {
-            return views[desc.index].size * 8;
-        }
-        else if constexpr (std::is_same_v<T, SubregisterDescriptor>)
-        {
-            return desc.bit_size;   // cached at resolve time
-        }
-        return 64;
-    }, h);
-}
-
-std::optional<uint64_t> Registers::read(const RegisterHandle& h) const
-{
-    return std::visit([this](auto&& desc) -> std::optional<uint64_t> {
-        using T = std::decay_t<decltype(desc)>;
-        if constexpr (std::is_same_v<T, FullRegisterDescriptor>)
-        {
-            const auto& rv = views[desc.index];
-            switch (rv.size)
-            {
-            case 1:  return rv.template get<uint8_t>();
-            case 2:  return rv.template get<uint16_t>();
-            case 4:  return rv.template get<uint32_t>();
-            case 8:  return rv.template get<uint64_t>();
-            case 16: {
-                __uint128_t v = rv.template get<__uint128_t>();
-                return static_cast<uint64_t>(v); // lower 64 bits for now
-            }
-            default: return std::nullopt;
-            }
-        }
-        else if constexpr (std::is_same_v<T, SubregisterDescriptor>)
-        {
-            // Use direct descriptor-based construction (no string allocation/parsing).
-            if (auto sv = make_subview(desc))
-            {
-                return sv->read_u64();
-            }
-            return std::nullopt;
-        }
-        return std::nullopt;
-    }, h);
-}
-
-void Registers::write(const RegisterHandle& h, uint64_t value)
-{
-    std::visit([this, value](auto&& desc) {
-        using T = std::decay_t<decltype(desc)>;
-        if constexpr (std::is_same_v<T, FullRegisterDescriptor>)
-        {
-            set_register(RegisterDescriptor{desc.index}, value);
-        }
-        else if constexpr (std::is_same_v<T, SubregisterDescriptor>)
-        {
-            // Use direct descriptor-based construction.
-            if (auto sv = make_subview(desc))
-            {
-                sv->write_u64(value);
-            }
-        }
-    }, h);
-}
-
-/* static */
-std::optional<uint64_t> Registers::parse_register_value(std::string_view text,
-                                                        RegisterFormat     fmt,
-                                                        size_t             bit_size)
-{
-    if (text.empty())
-        return std::nullopt;
-
-    if (fmt == RegisterFormat::F32 || fmt == RegisterFormat::F64)
-    {
-        char* end = nullptr;
-        double d = std::strtod(text.data(), &end);
-        if (end == text.data() || *end != '\0')
-            return std::nullopt;
-
-        if (fmt == RegisterFormat::F32)
-        {
-            float f = static_cast<float>(d);
-            uint32_t bits;
-            std::memcpy(&bits, &f, sizeof(bits));
-            return bits;
-        }
-        else
-        {
-            uint64_t bits;
-            std::memcpy(&bits, &d, sizeof(bits));
-            return bits;
-        }
-    }
-
-    // Integer / bit pattern path
-    char* end = nullptr;
-    uint64_t v = std::strtoull(text.data(), &end, 0);
-    if (end == text.data() || *end != '\0')
-        return std::nullopt;
-
-    // Mask to the target bit width for safety
-    if (bit_size > 0 && bit_size < 64)
-    {
-        uint64_t mask = (1ULL << bit_size) - 1;
-        v &= mask;
-    }
-    return v;
-}
-
-
-
 const RegisterView &Registers::get_register(RegisterDescriptor d) const
 {
     return views[d.index];
@@ -363,20 +155,34 @@ RegisterView &Registers::get_register(RegisterDescriptor d)
     return views[d.index];
 }
 
-void Registers::set_register(RegisterDescriptor d, uint64_t value)
+// Get subregister view (for access to its bits, with policy etc.).
+// Parallels get_register for full regs (returns the view, not raw value).
+// Use RegisterHandle::read() (via resolve()) as the preferred unified path for raw bits value.
+// (The old value-returning get_subregister was removed to avoid API confusion between
+// "get the register/subregister" = its View vs. getting its value bits.)
+SubregisterView Registers::get_subregister(const std::string &name) const
 {
-    // Reuse the existing size-dispatch logic by temporarily getting a reference
-    RegisterView &reg = views[d.index];
-    switch (reg.size)
-    {
-    case 1:  reg.set<uint8_t>(static_cast<uint8_t>(value)); break;
-    case 2:  reg.set<uint16_t>(static_cast<uint16_t>(value)); break;
-    case 4:  reg.set<uint32_t>(static_cast<uint32_t>(value)); break;
-    case 8:  reg.set<uint64_t>(value); break;
-    case 16: reg.set<__uint128_t>(static_cast<__uint128_t>(value)); break;
-    default: Error::send("Unsupported register size for descriptor");
+    auto h = resolve(name);
+    if (auto* sd = std::get_if<SubregisterDescriptor>(&h)) {
+        return get_subregister(*sd);
     }
+    Error::send("Not a subregister: " + name);
+    return SubregisterView{}; // unreachable
 }
+
+SubregisterView Registers::get_subregister(const SubregisterDescriptor &desc) const
+{
+    if (auto sv = make_subview(desc)) {
+        return *sv;
+    }
+    Error::send("Invalid SubregisterDescriptor");
+    return SubregisterView{}; // unreachable
+}
+
+// ============================================================================
+// Subregister view factories (string-based and descriptor-based)
+// (used by resolution, handle access, and sub get/set)
+// ============================================================================
 
 std::optional<SubregisterView> Registers::make_subview_by_name(std::string_view name, bool zero_upper_fp)
 {
@@ -438,28 +244,287 @@ std::optional<SubregisterView> Registers::make_subview(const SubregisterDescript
     }
 }
 
-std::optional<uint64_t> Registers::read_sub_u64(std::string_view name)
+// ============================================================================
+// Direct modification: set register/subregister *value*
+// ============================================================================
+
+void Registers::set_register(RegisterDescriptor d, __uint128_t value)
 {
-    auto sub = make_subview_by_name(name);
-    if (!sub.has_value())
+    // Size-dispatch; for 128-bit v regs use full value. For smaller regs,
+    // high bits (if passed) are truncated to low bits.
+    RegisterView &reg = views[d.index];
+    switch (reg.size)
+    {
+    case 1:  reg.set<uint8_t>(static_cast<uint8_t>(value)); break;
+    case 2:  reg.set<uint16_t>(static_cast<uint16_t>(value)); break;
+    case 4:  reg.set<uint32_t>(static_cast<uint32_t>(value)); break;
+    case 8:  reg.set<uint64_t>(static_cast<uint64_t>(value)); break;
+    case 16: reg.set<__uint128_t>(value); break;
+    default: Error::send("Unsupported register size for descriptor");
+    }
+}
+
+// Encapsulated subregister writing (wN, sN/dN, vN lanes etc.).
+// These are always <=64 bits. Use RegisterHandle::write() (via resolve())
+// as the preferred unified path when possible. (get_subregister/set_subregister
+// provide consistent "get/set the subregister" view access, parallel to full regs.)
+void Registers::set_subregister(const SubregisterDescriptor &desc, uint64_t value)
+{
+    if (auto sv = make_subview(desc))
+    {
+        sv->write_u64(value);
+        return;
+    }
+    Error::send("Invalid SubregisterDescriptor");
+}
+
+// ============================================================================
+// Name resolution: string -> descriptor/handle (used by unified paths)
+// ============================================================================
+
+size_t Registers::find_index(std::string_view name) const
+{
+    for (size_t i = 0; i < views.size(); ++i)
+    {
+        if (views[i].name == name)
+            return i;
+    }
+    Error::send_errno("Register not found: " + std::string(name));
+}
+
+RegisterDescriptor Registers::lookup(std::string_view name) const
+{
+    return { find_index(name) };
+}
+
+RegisterHandle Registers::resolve(std::string_view name) const
+{
+    // Try full register first (fast path + stable index)
+    for (size_t i = 0; i < views.size(); ++i)
+    {
+        if (views[i].name == name)
+        {
+            return FullRegisterDescriptor{i};
+        }
+    }
+
+    // Subregister
+    auto spec = detail::parse_subregister_name(name);
+    if (spec.kind != detail::SubregisterSpec::Kind::None)
+    {
+        SubregisterDescriptor sd;
+        using K = SubregisterDescriptor::Kind;
+
+        switch (spec.kind)
+        {
+        case detail::SubregisterSpec::Kind::Wn:      sd.kind = K::Wn;      break;
+        case detail::SubregisterSpec::Kind::Sn:      sd.kind = K::Sn;      break;
+        case detail::SubregisterSpec::Kind::Dn:      sd.kind = K::Dn;      break;
+        case detail::SubregisterSpec::Kind::V4sLane: sd.kind = K::V4sLane; break;
+        case detail::SubregisterSpec::Kind::V2dLane: sd.kind = K::V2dLane; break;
+        default:                                     sd.kind = K::None;    break;
+        }
+        sd.n    = spec.n;
+        sd.lane = spec.lane;
+
+        // Populate cached format + bit_size using the descriptor directly
+        // (no string reconstruction / round-trip through make_subview_by_name).
+        if (auto sv = make_subview(sd))
+        {
+            sd.format   = sv->format;
+            sd.bit_size = sv->bit_size;
+        }
+
+        return sd;
+    }
+
+    Error::send_errno("Register or subregister not found: " + std::string(name));
+}
+
+// ============================================================================
+// Handle-based operations (metadata + unified read/write for full + sub)
+// ============================================================================
+
+RegisterFormat Registers::get_format(const RegisterHandle& h) const
+{
+    return std::visit([this](auto&& desc) -> RegisterFormat {
+        using T = std::decay_t<decltype(desc)>;
+        if constexpr (std::is_same_v<T, FullRegisterDescriptor>)
+        {
+            return views[desc.index].format;
+        }
+        else if constexpr (std::is_same_v<T, SubregisterDescriptor>)
+        {
+            return desc.format;   // cached at resolve time
+        }
+        return RegisterFormat::U64;
+    }, h);
+}
+
+size_t Registers::get_bit_size(const RegisterHandle& h) const
+{
+    return std::visit([this](auto&& desc) -> size_t {
+        using T = std::decay_t<decltype(desc)>;
+        if constexpr (std::is_same_v<T, FullRegisterDescriptor>)
+        {
+            return views[desc.index].size * 8;
+        }
+        else if constexpr (std::is_same_v<T, SubregisterDescriptor>)
+        {
+            return desc.bit_size;   // cached at resolve time
+        }
+        return 64;
+    }, h);
+}
+
+std::optional<__uint128_t> Registers::read(const RegisterHandle& h) const
+{
+    return std::visit([this](auto&& desc) -> std::optional<__uint128_t> {
+        using T = std::decay_t<decltype(desc)>;
+        if constexpr (std::is_same_v<T, FullRegisterDescriptor>)
+        {
+            const auto& rv = views[desc.index];
+            switch (rv.size)
+            {
+            case 1:  return rv.template get<uint8_t>();
+            case 2:  return rv.template get<uint16_t>();
+            case 4:  return rv.template get<uint32_t>();
+            case 8:  return rv.template get<uint64_t>();
+            case 16: {
+                return rv.template get<__uint128_t>(); // full 128-bit for vN etc.
+            }
+            default: return std::nullopt;
+            }
+        }
+        else if constexpr (std::is_same_v<T, SubregisterDescriptor>)
+        {
+            // Encapsulated via get_subregister (the view; extract bits for uniform handle read).
+            auto sv = get_subregister(desc);
+            return static_cast<__uint128_t>(sv.read_u64());
+        }
         return std::nullopt;
-    return sub->read_u64();
+    }, h);
 }
 
-bool Registers::write_sub_u32(std::string_view name, uint32_t value)
+void Registers::write(const RegisterHandle& h, __uint128_t value)
 {
-    auto sub = make_subview_by_name(name);
-    if (!sub.has_value())
-        return false;
-    sub->write_u32(value);
-    return true;
+    std::visit([this, value](auto&& desc) {
+        using T = std::decay_t<decltype(desc)>;
+        if constexpr (std::is_same_v<T, FullRegisterDescriptor>)
+        {
+            set_register(RegisterDescriptor{desc.index}, value);
+        }
+        else if constexpr (std::is_same_v<T, SubregisterDescriptor>)
+        {
+            // Encapsulated via set_subregister.
+            set_subregister(desc, static_cast<uint64_t>(value));
+        }
+    }, h);
 }
 
-bool Registers::write_sub_u64(std::string_view name, uint64_t value)
+// ============================================================================
+// Value parsing for user input (used by writes via handles)
+// ============================================================================
+
+/* static */
+std::optional<__uint128_t> Registers::parse_register_value(std::string_view text,
+                                                           RegisterFormat     fmt,
+                                                           size_t             bit_size)
 {
-    auto sub = make_subview_by_name(name);
-    if (!sub.has_value())
-        return false;
-    sub->write_u64(value);
-    return true;
+    if (text.empty())
+        return std::nullopt;
+
+    if (fmt == RegisterFormat::F32 || fmt == RegisterFormat::F64)
+    {
+        char* end = nullptr;
+        double d = std::strtod(text.data(), &end);
+        if (end == text.data() || *end != '\0')
+            return std::nullopt;
+
+        if (fmt == RegisterFormat::F32)
+        {
+            float f = static_cast<float>(d);
+            uint32_t bits;
+            std::memcpy(&bits, &f, sizeof(bits));
+            return static_cast<__uint128_t>(bits);
+        }
+        else
+        {
+            uint64_t bits;
+            std::memcpy(&bits, &d, sizeof(bits));
+            return static_cast<__uint128_t>(bits);
+        }
+    }
+
+    // Special-case all-ones for any width (supports "-1" for 128-bit too)
+    {
+        // minimal trim
+        size_t p = 0;
+        while (p < text.size() && (text[p] == ' ' || text[p] == '\t')) ++p;
+        size_t e = text.size();
+        while (e > p && (text[e-1] == ' ' || text[e-1] == '\t')) --e;
+        std::string_view tv(text.data() + p, e - p);
+        if (tv == "-1" || tv == "~0") {
+            if (bit_size == 0 || bit_size >= 128) return ~__uint128_t(0);
+            return ((__uint128_t(1) << bit_size) - 1);
+        }
+    }
+
+    // Integer / bit pattern path — support full 128-bit hex (for Vec128 / vN)
+    // Detect 0x... (hex) and parse up to 32 hex digits manually.
+    bool looks_hex = false;
+    size_t hex_start = 0;
+    if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+        looks_hex = true;
+        hex_start = 2;
+    }
+
+    if (looks_hex) {
+        size_t ndigits = text.size() - hex_start;
+        size_t maxd = (bit_size == 0 || bit_size >= 128) ? 32u : ((bit_size + 3u) / 4u);
+        if (ndigits > maxd) return std::nullopt;
+
+        __uint128_t v = 0;
+        bool any_digit = false;
+        for (size_t i = hex_start; i < text.size(); ++i) {
+            char c = text[i];
+            int d = -1;
+            if (c >= '0' && c <= '9') d = c - '0';
+            else if (c >= 'a' && c <= 'f') d = 10 + (c - 'a');
+            else if (c >= 'A' && c <= 'F') d = 10 + (c - 'A');
+            else {
+                return std::nullopt; // invalid hex digit in 0x form
+            }
+            any_digit = true;
+            // check would overflow 128 bits (push nonzero out top)
+            if ((v >> (128 - 4)) != 0) {
+                return std::nullopt;
+            }
+            v = (v << 4) | static_cast<__uint128_t>(d);
+        }
+        if (!any_digit) return std::nullopt;
+
+        // mask to bit width if requested (<128)
+        if (bit_size > 0 && bit_size < 128) {
+            __uint128_t mask = ((__uint128_t(1) << bit_size) - 1);
+            v &= mask;
+        }
+        return v;
+    }
+
+    // Fallback for decimal/octal/short-hex (compat with prior behavior, <=64 bits)
+    char* end = nullptr;
+    uint64_t v64 = std::strtoull(text.data(), &end, 0);
+    if (end == text.data() || *end != '\0')
+        return std::nullopt;
+
+    __uint128_t v = static_cast<__uint128_t>(v64);
+
+    // Mask to the target bit width for safety (works for 1..127; 64-bit shift ok in __uint128_t)
+    if (bit_size > 0 && bit_size < 128) {
+        __uint128_t mask = ((__uint128_t(1) << bit_size) - 1);
+        v &= mask;
+    }
+    return v;
 }
+
